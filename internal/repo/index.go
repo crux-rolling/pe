@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ezke5/pe/internal/ui"
 )
 
 // Index matches the established index.json schema used for binary package releases,
@@ -106,6 +108,10 @@ func Save(path string, idx Index) error {
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("write temporary index file: %w", err)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("set permissions on temporary index file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temporary index file: %w", err)
@@ -226,6 +232,11 @@ func (idx Index) SortedNames() []string {
 
 // Sync downloads indexURL, validates it as a JSON index, and saves it atomically to destPath.
 func Sync(indexURL, destPath string, timeout time.Duration) (Index, error) {
+	return SyncWithLog(indexURL, destPath, timeout, nil, ui.Styler{})
+}
+
+// SyncWithLog downloads indexURL with optional progress logging, validates JSON, and saves to destPath.
+func SyncWithLog(indexURL, destPath string, timeout time.Duration, out io.Writer, styler ui.Styler) (Index, error) {
 	if err := ValidateHTTPURL(indexURL); err != nil {
 		return Index{}, err
 	}
@@ -238,12 +249,26 @@ func Sync(indexURL, destPath string, timeout time.Duration) (Index, error) {
 	if resp.StatusCode != http.StatusOK {
 		return Index{}, fmt.Errorf("download index %q: unexpected HTTP status %s", indexURL, resp.Status)
 	}
-	body, err := io.ReadAll(resp.Body)
+
+	var reader io.Reader = resp.Body
+	var prog *ui.Progress
+	if out != nil {
+		prog = ui.NewProgress(out, styler, "syncing index.json", resp.ContentLength)
+		reader = io.TeeReader(resp.Body, prog)
+	}
+
+	body, err := io.ReadAll(reader)
 	if err != nil {
+		if prog != nil {
+			prog.Fail()
+		}
 		return Index{}, fmt.Errorf("read index %q: %w", indexURL, err)
 	}
 	var idx Index
 	if err := json.Unmarshal(body, &idx); err != nil {
+		if prog != nil {
+			prog.Fail()
+		}
 		return Index{}, fmt.Errorf("parse remote index %q: %w", indexURL, err)
 	}
 	if idx.SchemaVersion == 0 {
@@ -253,13 +278,24 @@ func Sync(indexURL, destPath string, timeout time.Duration) (Index, error) {
 		idx.Packages = make(map[string]Package)
 	}
 	if err := Save(destPath, idx); err != nil {
+		if prog != nil {
+			prog.Fail()
+		}
 		return Index{}, err
+	}
+	if prog != nil {
+		prog.Finish(fmt.Sprintf("[%d packages]", len(idx.Packages)))
 	}
 	return idx, nil
 }
 
 // FetchBinary ensures the binary archive for entry exists in cacheDir and matches its SHA-256 checksum.
 func FetchBinary(entry Entry, cacheDir string, timeout time.Duration, out io.Writer) (string, error) {
+	return FetchBinaryWithStyle(entry, cacheDir, timeout, out, ui.NewStyler(ui.ColorNever, out))
+}
+
+// FetchBinaryWithStyle downloads (or reuses cached) binary archive with styled progress and checksum logs.
+func FetchBinaryWithStyle(entry Entry, cacheDir string, timeout time.Duration, out io.Writer, styler ui.Styler) (string, error) {
 	if out == nil {
 		out = io.Discard
 	}
@@ -272,8 +308,18 @@ func FetchBinary(entry Entry, cacheDir string, timeout time.Duration, out io.Wri
 	localPath := filepath.Join(cacheDir, entry.Filename)
 	if info, err := os.Stat(localPath); err == nil && info.Mode().IsRegular() {
 		if err := VerifySHA256(localPath, entry.SHA256); err == nil {
+			fmt.Fprintf(out, "%s using cached %s (%s) %s\n",
+				styler.BoldGreen("==>"),
+				styler.Bold(entry.Filename),
+				ui.FormatBytes(info.Size()),
+				styler.Green("[sha256 ok]"),
+			)
 			return localPath, nil
 		}
+		fmt.Fprintf(out, "%s cached %s failed checksum; re-downloading\n",
+			styler.BoldYellow("==>"),
+			entry.Filename,
+		)
 		_ = os.Remove(localPath)
 	}
 	if entry.URL == "" {
@@ -283,12 +329,7 @@ func FetchBinary(entry Entry, cacheDir string, timeout time.Duration, out io.Wri
 		return "", err
 	}
 
-	fmt.Fprintf(out, "downloading %s...\n", entry.Filename)
-	if err := downloadFile(entry.URL, localPath, timeout); err != nil {
-		return "", err
-	}
-	if err := VerifySHA256(localPath, entry.SHA256); err != nil {
-		_ = os.Remove(localPath)
+	if err := downloadFile(entry.URL, localPath, entry.Filename, entry.Size, entry.SHA256, timeout, out, styler); err != nil {
 		return "", err
 	}
 	return localPath, nil
@@ -388,7 +429,7 @@ func tokenizeVersion(v string) []string {
 	})
 }
 
-func downloadFile(rawURL, destPath string, timeout time.Duration) error {
+func downloadFile(rawURL, destPath, label string, expectedSize int64, expectedSHA256 string, timeout time.Duration, out io.Writer, styler ui.Styler) error {
 	client := &http.Client{Timeout: effectiveTimeout(timeout)}
 	resp, err := client.Get(rawURL)
 	if err != nil {
@@ -398,22 +439,49 @@ func downloadFile(rawURL, destPath string, timeout time.Duration) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %q: unexpected HTTP status %s", rawURL, resp.Status)
 	}
+	total := resp.ContentLength
+	if total <= 0 && expectedSize > 0 {
+		total = expectedSize
+	}
+	if label == "" {
+		label = filepath.Base(destPath)
+	}
+	prog := ui.NewProgress(out, styler, "downloading "+label, total)
+
 	tmp, err := os.CreateTemp(filepath.Dir(destPath), ".pe-dl-*")
 	if err != nil {
+		prog.Fail()
 		return fmt.Errorf("create temp download file: %w", err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	if _, err := io.Copy(tmp, io.TeeReader(resp.Body, prog)); err != nil {
+		prog.Fail()
 		_ = tmp.Close()
 		return fmt.Errorf("write download %q: %w", destPath, err)
 	}
+	if err := tmp.Chmod(0o644); err != nil {
+		prog.Fail()
+		_ = tmp.Close()
+		return fmt.Errorf("set permissions on download %q: %w", destPath, err)
+	}
 	if err := tmp.Close(); err != nil {
+		prog.Fail()
 		return fmt.Errorf("close download %q: %w", destPath, err)
 	}
+	if err := VerifySHA256(tmpName, expectedSHA256); err != nil {
+		prog.Fail()
+		return err
+	}
 	if err := os.Rename(tmpName, destPath); err != nil {
+		prog.Fail()
 		return fmt.Errorf("finalize download %q: %w", destPath, err)
 	}
+	suffix := ""
+	if strings.TrimSpace(expectedSHA256) != "" {
+		suffix = "[sha256 ok]"
+	}
+	prog.Finish(suffix)
 	return nil
 }
 

@@ -160,7 +160,10 @@ ignore_signature = true
 	rt := RuntimeOptions{SkipRootCheck: true, SkipLdconfig: true}
 	run := func(args ...string) (int, string, string) {
 		var out, errOut bytes.Buffer
-		fullArgs := append([]string{"--config", cfgPath}, args...)
+		var fullArgs []string
+		// Allow test callers to pass global flags before subcommands cleanly.
+		fullArgs = append(fullArgs, "--config", cfgPath)
+		fullArgs = append(fullArgs, args...)
 		code := RunWithOptions(fullArgs, &out, &errOut, rt)
 		return code, out.String(), errOut.String()
 	}
@@ -175,14 +178,25 @@ ignore_signature = true
 		t.Fatalf("list --ports failed: code=%d out=%q err=%q", code, out, errOut)
 	}
 
-	// 3. pe search (short-form output)
+	// 3. pe search (short-form output, plain and colored modes)
 	if code, out, errOut := run("search", "demo"); code != 0 || !strings.Contains(out, "demo 1.0-1 [bin,port] - Demo binary package") {
 		t.Fatalf("search failed: code=%d out=%q err=%q", code, out, errOut)
 	}
+	if code, out, errOut := run("--color=always", "search", "demo"); code != 0 || !strings.Contains(out, "\x1b[") || !strings.Contains(out, "demo") {
+		t.Fatalf("colored search failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+	if code, out, errOut := run("--no-color", "search", "demo"); code != 0 || strings.Contains(out, "\x1b[") {
+		t.Fatalf("no-color search failed: code=%d out=%q err=%q", code, out, errOut)
+	}
 
-	// 4. pe install demo (binary-first)
-	if code, out, errOut := run("install", "demo"); code != 0 || !strings.Contains(out, "installed demo 1.0-1") {
+	// 4. pe install demo (binary-first, with download progress log)
+	if code, out, errOut := run("install", "demo"); code != 0 || !strings.Contains(out, "installed demo 1.0-1") || !strings.Contains(out, "[sha256 ok]") {
 		t.Fatalf("install demo failed: code=%d out=%q err=%q", code, out, errOut)
+	}
+
+	// 4b. Verify flags work AFTER package names (e.g. `pe install demo --upgrade --force`)
+	if code, out, errOut := run("install", "demo", "--upgrade", "--force"); code != 0 || !strings.Contains(out, "installed demo 1.0-1") {
+		t.Fatalf("interspersed flags install failed: code=%d out=%q err=%q", code, out, errOut)
 	}
 
 	// 5. pe install sourceonly MUST fail and instruct `pe build sourceonly` (never auto-build!)

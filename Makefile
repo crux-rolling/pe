@@ -7,7 +7,7 @@ DESTDIR ?=
 VERSION ?= 0.1.0
 LDFLAGS := -s -w -X github.com/ezke5/pe/internal/cli.Version=$(VERSION)
 
-.PHONY: all build test verify clean install
+.PHONY: all build bin/pe bin/pe-index test verify clean install
 
 all: build
 

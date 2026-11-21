@@ -74,3 +74,7 @@ keep_work = false
 download_prog = curl
 curl_opts =
 wget_opts =
+
+[ui]
+# Color output mode: auto (TTY-aware, respects NO_COLOR), always, or never
+color = auto

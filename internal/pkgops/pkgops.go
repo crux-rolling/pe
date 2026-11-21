@@ -11,12 +11,16 @@ import (
 	"github.com/ezke5/pe/internal/pkgdb"
 )
 
+// DefaultMaxConflictsDisplayed limits conflict lines printed to stderr unless Verbose is set.
+const DefaultMaxConflictsDisplayed = 20
+
 // InstallOptions controls a CRUX pkgadd-compatible archive install or upgrade.
 type InstallOptions struct {
 	Root          string
 	PkgaddConf    string
 	Upgrade       bool
 	Force         bool
+	Verbose       bool
 	SkipRootCheck bool
 	SkipLdconfig  bool
 	Out           io.Writer
@@ -42,6 +46,10 @@ func InstallArchive(archivePath string, opts InstallOptions) (pkgName, version s
 	}
 	if !opts.SkipRootCheck && os.Geteuid() != 0 {
 		return "", "", fmt.Errorf("only root can install/upgrade packages")
+	}
+
+	if err := pkgdb.EnsureInitialized(opts.Root); err != nil {
+		return "", "", err
 	}
 
 	lock, err := pkgdb.AcquireLock(opts.Root, true)
@@ -84,10 +92,18 @@ func InstallArchive(archivePath string, opts InstallOptions) (pkgName, version s
 			}
 			db.RemoveFiles(conflicts, forceKeep, opts.ErrOut)
 		} else {
-			for _, f := range conflicts {
+			limit := len(conflicts)
+			if !opts.Verbose && limit > DefaultMaxConflictsDisplayed {
+				limit = DefaultMaxConflictsDisplayed
+			}
+			for _, f := range conflicts[:limit] {
 				fmt.Fprintln(opts.ErrOut, f)
 			}
-			return "", "", fmt.Errorf("listed file(s) already installed (use --force to ignore and overwrite)")
+			if len(conflicts) > limit {
+				fmt.Fprintf(opts.ErrOut, "... and %d more conflicting file(s) (%d total; pass --verbose to list all)\n",
+					len(conflicts)-limit, len(conflicts))
+			}
+			return "", "", fmt.Errorf("%d conflicting file(s) already exist on disk (use --force to overwrite)", len(conflicts))
 		}
 	}
 

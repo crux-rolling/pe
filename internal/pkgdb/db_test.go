@@ -133,14 +133,21 @@ func TestConflictDetectionAndSharedRemoval(t *testing.T) {
 		t.Fatalf("unexpected upgrade conflicts: %v", upgradeConflicts)
 	}
 
-	// Removing pkga must delete usr/bin/only-a but keep usr/bin/shared (still owned by pkgb).
+	// Removing pkga must delete usr/bin/only-a but keep usr/bin/shared (still owned by pkgb)
+	// and must not spam ENOTEMPTY errors for non-empty directories containing untracked files.
 	var errBuf bytes.Buffer
 	db.RemovePkg("pkga", nil, &errBuf)
+	if errBuf.Len() != 0 {
+		t.Fatalf("unexpected stderr during RemovePkg: %q", errBuf.String())
+	}
 	if _, err := os.Lstat(filepath.Join(root, "usr/bin/only-a")); !os.IsNotExist(err) {
 		t.Fatalf("expected usr/bin/only-a to be removed")
 	}
 	if _, err := os.Lstat(filepath.Join(root, "usr/bin/shared")); err != nil {
 		t.Fatalf("expected usr/bin/shared to remain because pkgb still references it: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "usr/bin/untracked")); err != nil {
+		t.Fatalf("expected untracked file to remain untouched: %v", err)
 	}
 }
 

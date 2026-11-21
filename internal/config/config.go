@@ -24,6 +24,12 @@ type Config struct {
 	Paths PathsConfig
 	Repo  RepoConfig
 	Build BuildConfig
+	UI    UIConfig
+}
+
+// UIConfig configures terminal output behavior.
+type UIConfig struct {
+	Color string
 }
 
 // PathsConfig configures filesystem paths compatible with standard CRUX Linux.
@@ -113,6 +119,9 @@ func Default() Config {
 			IgnoreSignature:  true,
 			KeepWork:         false,
 			DownloadProg:     "curl",
+		},
+		UI: UIConfig{
+			Color: "auto",
 		},
 	}
 }
@@ -304,6 +313,13 @@ func Parse(input string, cfg *Config) error {
 			default:
 				return fmt.Errorf("line %d: unknown key %q in [build]", lineNum, key)
 			}
+		case "ui":
+			switch key {
+			case "color":
+				cfg.UI.Color = strings.ToLower(val)
+			default:
+				return fmt.Errorf("line %d: unknown key %q in [ui]", lineNum, key)
+			}
 		default:
 			return fmt.Errorf("line %d: unknown section [%s]", lineNum, section)
 		}
@@ -339,6 +355,14 @@ func (c Config) Validate() error {
 	}
 	if c.Paths.Root == "" {
 		return fmt.Errorf("paths.root must not be empty")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.UI.Color)) {
+	case "", "auto", "always", "never":
+		if c.UI.Color == "" {
+			c.UI.Color = "auto"
+		}
+	default:
+		return fmt.Errorf("unsupported ui.color %q (expected auto, always, or never)", c.UI.Color)
 	}
 	return nil
 }

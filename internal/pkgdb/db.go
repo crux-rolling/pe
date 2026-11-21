@@ -335,8 +335,7 @@ func (db *DB) RemovePkg(name string, keepList map[string]struct{}, errOut io.Wri
 		}
 	}
 
-	ignoreNotEmpty := keepList != nil
-	removePathsReverse(db.Root, files, ignoreNotEmpty, errOut)
+	removePathsReverse(db.Root, files, true, errOut)
 }
 
 // RemoveFiles implements pkgutil::db_rm_files for forced conflict removal.
@@ -385,11 +384,23 @@ func removePathsReverse(root string, files map[string]struct{}, ignoreNotEmpty b
 	for f := range files {
 		sorted = append(sorted, f)
 	}
-	sort.Strings(sorted)
+	// Sort deepest paths first (files before their parent directories), breaking ties reverse-lexicographically.
+	sort.Slice(sorted, func(i, j int) bool {
+		di := strings.Count(strings.TrimSuffix(sorted[i], "/"), "/")
+		dj := strings.Count(strings.TrimSuffix(sorted[j], "/"), "/")
+		if di != dj {
+			return di > dj
+		}
+		dirI := strings.HasSuffix(sorted[i], "/")
+		dirJ := strings.HasSuffix(sorted[j], "/")
+		if dirI != dirJ {
+			return !dirI
+		}
+		return sorted[i] > sorted[j]
+	})
 
-	// Delete in reverse lexicographical order so files inside a directory are deleted before the directory.
-	for i := len(sorted) - 1; i >= 0; i-- {
-		full := filepath.Join(root, sorted[i])
+	for _, rel := range sorted {
+		full := filepath.Join(root, rel)
 		if _, err := os.Lstat(full); err != nil {
 			continue
 		}
@@ -397,7 +408,6 @@ func removePathsReverse(root string, files map[string]struct{}, ignoreNotEmpty b
 			if ignoreNotEmpty && isNotEmpty(err) {
 				continue
 			}
-			// Even in plain pkgrm, removing a non-empty directory that contains untracked files logs a warning and continues.
 			if errOut != nil {
 				fmt.Fprintf(errOut, "pe: could not remove %s: %v\n", full, err)
 			}

@@ -22,6 +22,7 @@ import (
 	"github.com/ezke5/pe/internal/archive"
 	"github.com/ezke5/pe/internal/config"
 	"github.com/ezke5/pe/internal/ports"
+	"github.com/ezke5/pe/internal/ui"
 )
 
 // Options customizes a single Pkgfile build invocation.
@@ -276,7 +277,7 @@ func downloadSourceFile(cfg config.Config, rawURL, destPath string, out io.Write
 			}
 		}
 		if strings.HasPrefix(candidate, "http://") || strings.HasPrefix(candidate, "https://") {
-			if err := httpDownload(candidate, destPath, time.Duration(cfg.Repo.TimeoutSeconds)*time.Second); err == nil {
+			if err := httpDownload(candidate, destPath, time.Duration(cfg.Repo.TimeoutSeconds)*time.Second, out, ui.NewStyler(cfg.UI.Color, out)); err == nil {
 				return nil
 			} else {
 				lastErr = err
@@ -318,7 +319,7 @@ func downloadSourceFile(cfg config.Config, rawURL, destPath string, out io.Write
 	return fmt.Errorf("downloading %q failed: %w", rawURL, lastErr)
 }
 
-func httpDownload(rawURL, destPath string, timeout time.Duration) error {
+func httpDownload(rawURL, destPath string, timeout time.Duration, out io.Writer, styler ui.Styler) error {
 	if timeout <= 0 {
 		timeout = 120 * time.Second
 	}
@@ -331,21 +332,31 @@ func httpDownload(rawURL, destPath string, timeout time.Duration) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %s", resp.Status)
 	}
+	prog := ui.NewProgress(out, styler, "downloading "+filepath.Base(destPath), resp.ContentLength)
 	partial := destPath + ".partial"
 	f, err := os.Create(partial)
 	if err != nil {
+		prog.Fail()
 		return err
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	if _, err := io.Copy(f, io.TeeReader(resp.Body, prog)); err != nil {
+		prog.Fail()
 		_ = f.Close()
 		_ = os.Remove(partial)
 		return err
 	}
+	_ = f.Chmod(0o644)
 	if err := f.Close(); err != nil {
+		prog.Fail()
 		_ = os.Remove(partial)
 		return err
 	}
-	return os.Rename(partial, destPath)
+	if err := os.Rename(partial, destPath); err != nil {
+		prog.Fail()
+		return err
+	}
+	prog.Finish("")
+	return nil
 }
 
 func copyFile(src, dst string) error {

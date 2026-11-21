@@ -128,3 +128,81 @@ func TestInstallUpgradeConflictAndRemove(t *testing.T) {
 		t.Fatalf("expected hello removed from DB")
 	}
 }
+
+func TestInstallInitializesMissingPkgDB(t *testing.T) {
+	freshRoot := filepath.Join(t.TempDir(), "fresh-root")
+	pkgDir := t.TempDir()
+	pkg := buildTestPkg(t, pkgDir, "zig", "0.17.1-1", map[string]string{
+		"usr/bin/zig": "zig-binary\n",
+	})
+
+	var out, errOut bytes.Buffer
+	name, ver, err := InstallArchive(pkg, InstallOptions{
+		Root:          freshRoot,
+		SkipRootCheck: true,
+		SkipLdconfig:  true,
+		Out:           &out,
+		ErrOut:        &errOut,
+	})
+	if err != nil {
+		t.Fatalf("InstallArchive on uninitialized root failed: %v", err)
+	}
+	if name != "zig" || ver != "0.17.1-1" {
+		t.Fatalf("got (%q, %q)", name, ver)
+	}
+	db, err := pkgdb.Open(freshRoot)
+	if err != nil {
+		t.Fatalf("Open initialized db: %v", err)
+	}
+	if !db.FindPkg("zig") {
+		t.Fatalf("expected zig registered in newly initialized DB")
+	}
+}
+
+func TestConflictTruncationAndVerbose(t *testing.T) {
+	root := t.TempDir()
+	files := make(map[string]string, 30)
+	for i := 0; i < 30; i++ {
+		rel := filepath.Join("usr/lib/big", string(rune('a'+(i/26)))+string(rune('a'+(i%26)))+".txt")
+		files[rel] = "data\n"
+		full := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("existing\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pkg := buildTestPkg(t, t.TempDir(), "big", "1.0-1", files)
+
+	var errBuf bytes.Buffer
+	_, _, err := InstallArchive(pkg, InstallOptions{
+		Root:          root,
+		SkipRootCheck: true,
+		SkipLdconfig:  true,
+		ErrOut:        &errBuf,
+	})
+	if err == nil {
+		t.Fatalf("expected conflict error")
+	}
+	lines := bytes.Split(bytes.TrimSpace(errBuf.Bytes()), []byte("\n"))
+	if len(lines) != DefaultMaxConflictsDisplayed+1 {
+		t.Fatalf("expected %d truncated lines + summary, got %d:\n%s", DefaultMaxConflictsDisplayed+1, len(lines), errBuf.String())
+	}
+
+	errBuf.Reset()
+	_, _, err = InstallArchive(pkg, InstallOptions{
+		Root:          root,
+		Verbose:       true,
+		SkipRootCheck: true,
+		SkipLdconfig:  true,
+		ErrOut:        &errBuf,
+	})
+	if err == nil {
+		t.Fatalf("expected conflict error in verbose mode")
+	}
+	lines = bytes.Split(bytes.TrimSpace(errBuf.Bytes()), []byte("\n"))
+	if len(lines) != 30 {
+		t.Fatalf("expected all 30 conflict lines in verbose mode, got %d", len(lines))
+	}
+}

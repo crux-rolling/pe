@@ -121,6 +121,9 @@ func TestSyncAndFetchBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sync failed: %v", err)
 	}
+	if info, err := os.Stat(idxPath); err != nil || info.Mode().Perm()&0o044 != 0o044 {
+		t.Fatalf("expected world-readable index.json (0644), got mode %v err=%v", info.Mode().Perm(), err)
+	}
 	entry, ok := Find(idx, "demo", "x86_64")
 	if !ok {
 		t.Fatalf("demo not found in synced index")
@@ -130,8 +133,23 @@ func TestSyncAndFetchBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchBinary failed: %v", err)
 	}
+	if info, err := os.Stat(gotPath); err != nil || info.Mode().Perm()&0o044 != 0o044 {
+		t.Fatalf("expected world-readable cached binary (0644), got mode %v err=%v", info.Mode().Perm(), err)
+	}
+	if !strings.Contains(out.String(), "[sha256 ok]") {
+		t.Fatalf("expected download log with [sha256 ok], got %q", out.String())
+	}
 	gotBytes, err := os.ReadFile(gotPath)
 	if err != nil || !bytes.Equal(gotBytes, payload) {
 		t.Fatalf("downloaded payload mismatch: err=%v", err)
+	}
+
+	// Second call should log cache reuse.
+	out.Reset()
+	if _, err := FetchBinary(entry, filepath.Join(cacheDir, "bin"), 10*time.Second, &out); err != nil {
+		t.Fatalf("cached FetchBinary failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "using cached") {
+		t.Fatalf("expected cache hit log, got %q", out.String())
 	}
 }

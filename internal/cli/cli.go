@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/ezke5/pe/internal/pkgops"
 	"github.com/ezke5/pe/internal/ports"
 	"github.com/ezke5/pe/internal/repo"
+	"github.com/ezke5/pe/internal/ui"
 )
 
 // Version is injected at link time via -ldflags.
@@ -31,6 +33,11 @@ var Version = "0.1.0"
 type RuntimeOptions struct {
 	SkipRootCheck bool
 	SkipLdconfig  bool
+}
+
+type uiContext struct {
+	out ui.Styler
+	err ui.Styler
 }
 
 // Run executes the pe CLI with standard production runtime options.
@@ -49,7 +56,8 @@ func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) 
 
 	globalFlags, rest, err := parseGlobalArgs(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "pe: %v\n", err)
+		es := ui.NewStyler(ui.ColorAuto, stderr)
+		fmt.Fprintf(stderr, "%s %v\n", es.BoldRed("pe:"), err)
 		return 2
 	}
 	if globalFlags.showVersion {
@@ -68,11 +76,20 @@ func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) 
 	explicitCfg := strings.TrimSpace(globalFlags.configPath) != "" || strings.TrimSpace(os.Getenv("PE_CONFIG")) != ""
 	cfg, err := config.Load(cfgPath, explicitCfg)
 	if err != nil {
-		fmt.Fprintf(stderr, "pe: %v\n", err)
+		es := ui.NewStyler(globalFlags.colorMode, stderr)
+		fmt.Fprintf(stderr, "%s %v\n", es.BoldRed("pe:"), err)
 		return 1
 	}
 	if strings.TrimSpace(globalFlags.rootOverride) != "" {
 		cfg.Paths.Root = globalFlags.rootOverride
+	}
+	if globalFlags.colorMode != "" {
+		cfg.UI.Color = globalFlags.colorMode
+	}
+
+	styles := uiContext{
+		out: ui.NewStyler(cfg.UI.Color, stdout),
+		err: ui.NewStyler(cfg.UI.Color, stderr),
 	}
 
 	cmd := rest[0]
@@ -81,19 +98,19 @@ func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) 
 	var runErr error
 	switch cmd {
 	case "sync":
-		runErr = cmdSync(cfg, cmdArgs, stdout, stderr)
+		runErr = cmdSync(cfg, cmdArgs, stdout, stderr, styles)
 	case "update":
-		runErr = cmdUpdate(cfg, cmdArgs, stdout, stderr, rt)
+		runErr = cmdUpdate(cfg, cmdArgs, stdout, stderr, rt, styles)
 	case "install":
-		runErr = cmdInstall(cfg, cmdArgs, stdout, stderr, rt)
+		runErr = cmdInstall(cfg, cmdArgs, stdout, stderr, rt, styles)
 	case "build":
-		runErr = cmdBuild(cfg, cmdArgs, stdout, stderr, rt)
+		runErr = cmdBuild(cfg, cmdArgs, stdout, stderr, rt, styles)
 	case "search":
-		runErr = cmdSearch(cfg, cmdArgs, stdout, stderr)
+		runErr = cmdSearch(cfg, cmdArgs, stdout, stderr, styles)
 	case "list":
-		runErr = cmdList(cfg, cmdArgs, stdout, stderr)
+		runErr = cmdList(cfg, cmdArgs, stdout, stderr, styles)
 	case "remove", "uninstall", "rm":
-		runErr = cmdRemove(cfg, cmdArgs, stdout, stderr, rt)
+		runErr = cmdRemove(cfg, cmdArgs, stdout, stderr, rt, styles)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return 0
@@ -101,13 +118,13 @@ func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) 
 		fmt.Fprintf(stdout, "pe %s\n", Version)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "pe: unknown command %q\n\n", cmd)
+		fmt.Fprintf(stderr, "%s unknown command %q\n\n", styles.err.BoldRed("pe:"), cmd)
 		printUsage(stderr)
 		return 2
 	}
 
 	if runErr != nil {
-		fmt.Fprintf(stderr, "pe: %v\n", runErr)
+		fmt.Fprintf(stderr, "%s %v\n", styles.err.BoldRed("pe:"), runErr)
 		return 1
 	}
 	return 0
@@ -116,6 +133,7 @@ func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) 
 type globalOpts struct {
 	configPath   string
 	rootOverride string
+	colorMode    string
 	showHelp     bool
 	showVersion  bool
 }
@@ -153,6 +171,26 @@ func parseGlobalArgs(args []string) (globalOpts, []string, error) {
 		case strings.HasPrefix(a, "--root="):
 			opts.rootOverride = strings.TrimPrefix(a, "--root=")
 			i++
+		case a == "--no-color":
+			opts.colorMode = ui.ColorNever
+			i++
+		case a == "--color":
+			if i+1 >= len(args) {
+				return opts, nil, fmt.Errorf("option %s requires an argument (auto, always, or never)", a)
+			}
+			mode, err := ui.NormalizeColorMode(args[i+1])
+			if err != nil {
+				return opts, nil, err
+			}
+			opts.colorMode = mode
+			i += 2
+		case strings.HasPrefix(a, "--color="):
+			mode, err := ui.NormalizeColorMode(strings.TrimPrefix(a, "--color="))
+			if err != nil {
+				return opts, nil, err
+			}
+			opts.colorMode = mode
+			i++
 		default:
 			return opts, nil, fmt.Errorf("unknown global option %q", a)
 		}
@@ -164,39 +202,49 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, `usage: pe [global options] <command> [options] [args...]
 
 Global options:
-  -c, --config <file>   path to pe.ini configuration file (default: /etc/pe.ini)
-  -r, --root <path>     specify alternative CRUX installation root
-  -v, --version         print version and exit
-  -h, --help            print help and exit
+  -c, --config <file>     path to pe.ini configuration file (default: /etc/pe.ini)
+  -r, --root <path>       specify alternative CRUX installation root
+      --color <mode>      colorize output: auto, always, or never (default: auto)
+      --no-color          disable colored output (same as --color=never)
+  -v, --version           print version and exit
+  -h, --help              print help and exit
 
 Commands:
-  sync                  sync binary index.json from ezke5/packages rolling-x86_64 (and optional --ports)
-  update                upgrade installed packages binary-first (reports missing binaries for pe build)
-  install               install binary package(s) from index.json or local .pkg.tar.<ext> archive
-  build                 build package(s) from local CRUX Pkgfile ports using pe.ini settings
-  search                short-form search across binary index, local ports, and installed packages
-  list                  list installed packages, ports (--ports), binaries (--binaries), files, or owners
-  remove, uninstall     remove installed package(s) using CRUX pkgrm policy
+  sync                    sync binary index.json from ezke5/packages rolling-x86_64 (and optional --ports)
+  update                  upgrade installed packages binary-first (reports missing binaries for pe build)
+  install                 install binary package(s) from index.json or local .pkg.tar.<ext> archive
+  build                   build package(s) from local CRUX Pkgfile ports using pe.ini settings
+  search                  short-form search across binary index, local ports, and installed packages
+  list                    list installed packages, ports (--ports), binaries (--binaries), files, or owners
+  remove, uninstall       remove installed package(s) using CRUX pkgrm policy
 `)
 }
 
 // --- sync ---
 
-func cmdSync(cfg config.Config, args []string, stdout, stderr io.Writer) error {
+func cmdSync(cfg config.Config, args []string, stdout, stderr io.Writer, styles uiContext) error {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	syncPorts := fs.Bool("ports", false, "also sync CRUX ports collections via /etc/ports/drivers")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 
 	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
-	idx, err := repo.Sync(cfg.Repo.IndexURL, cfg.LocalIndexPath(), timeout)
+	idx, err := repo.SyncWithLog(cfg.Repo.IndexURL, cfg.LocalIndexPath(), timeout, stdout, styles.out)
 	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return fmt.Errorf("%w (run with sudo or configure cache_dir in pe.ini)", err)
+		}
 		return err
 	}
-	fmt.Fprintf(stdout, "synced %s (%d packages) from %s (%s)\n",
-		cfg.LocalIndexPath(), len(idx.Packages), cfg.Repo.Repository, cfg.Repo.Tag)
+	fmt.Fprintf(stdout, "%s %s (%d packages) from %s (%s)\n",
+		styles.out.BoldGreen("synced"),
+		cfg.LocalIndexPath(),
+		len(idx.Packages),
+		styles.out.Bold(cfg.Repo.Repository),
+		styles.out.Cyan(cfg.Repo.Tag),
+	)
 
 	if *syncPorts {
 		cols := fs.Args()
@@ -209,25 +257,27 @@ func cmdSync(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 
 // --- install (strictly binary-first, never auto-builds) ---
 
-func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt RuntimeOptions) error {
+func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt RuntimeOptions, styles uiContext) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	upgrade := fs.Bool("upgrade", false, "upgrade an already installed package")
 	upgradeShort := fs.Bool("u", false, "upgrade an already installed package")
 	force := fs.Bool("force", false, "overwrite conflicting files")
 	forceShort := fs.Bool("f", false, "overwrite conflicting files")
+	verbose := fs.Bool("verbose", false, "list all conflicting files without truncation")
 	withDeps := fs.Bool("deps", false, "also install missing dependencies from binary index")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 
 	targets := fs.Args()
 	if len(targets) == 0 {
-		return fmt.Errorf("usage: pe install [--upgrade] [--force] [--deps] <package|file...>")
+		return fmt.Errorf("usage: pe install [--upgrade] [--force] [--deps] [--verbose] <package|file...>")
 	}
 
 	doUpgrade := *upgrade || *upgradeShort
 	doForce := *force || *forceShort
+	doVerbose := *verbose
 
 	var localFiles []string
 	var pkgNames []string
@@ -248,6 +298,7 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 			PkgaddConf:    cfg.Paths.PkgaddConf,
 			Upgrade:       doUpgrade,
 			Force:         doForce,
+			Verbose:       doVerbose,
 			SkipRootCheck: rt.SkipRootCheck,
 			SkipLdconfig:  rt.SkipLdconfig,
 			Out:           stdout,
@@ -256,7 +307,7 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "installed %s %s\n", name, ver)
+		fmt.Fprintf(stdout, "%s %s %s\n", styles.out.BoldGreen("installed"), styles.out.Bold(name), styles.out.Cyan(ver))
 	}
 
 	if len(pkgNames) == 0 {
@@ -295,15 +346,20 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 	}
 	if len(missing) > 0 {
 		for _, m := range missing {
-			fmt.Fprintf(stderr, "no binary available for %s in %s (%s); run: pe build %s\n",
-				m, cfg.Repo.Repository, cfg.Repo.Tag, m)
+			fmt.Fprintf(stderr, "%s no binary available for %s in %s (%s); run: %s\n",
+				styles.err.BoldYellow("warning:"),
+				styles.err.Bold(m),
+				cfg.Repo.Repository,
+				cfg.Repo.Tag,
+				styles.err.Bold("pe build "+m),
+			)
 		}
 		return fmt.Errorf("binary package(s) unavailable: %s (run `pe build <pkg>` to compile from ports)", strings.Join(missing, ", "))
 	}
 
 	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
 	for _, entry := range entries {
-		localPath, err := repo.FetchBinary(entry, cfg.BinaryCacheDir(), timeout, stdout)
+		localPath, err := repo.FetchBinaryWithStyle(entry, cfg.BinaryCacheDir(), timeout, stdout, styles.out)
 		if err != nil {
 			return err
 		}
@@ -312,6 +368,7 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 			PkgaddConf:    cfg.Paths.PkgaddConf,
 			Upgrade:       doUpgrade,
 			Force:         doForce,
+			Verbose:       doVerbose,
 			SkipRootCheck: rt.SkipRootCheck,
 			SkipLdconfig:  rt.SkipLdconfig,
 			Out:           stdout,
@@ -320,21 +377,22 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "installed %s %s\n", name, ver)
+		fmt.Fprintf(stdout, "%s %s %s\n", styles.out.BoldGreen("installed"), styles.out.Bold(name), styles.out.Cyan(ver))
 	}
 	return nil
 }
 
 // --- update (binary-first upgrade of installed packages) ---
 
-func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt RuntimeOptions) error {
+func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt RuntimeOptions, styles uiContext) error {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	force := fs.Bool("force", false, "overwrite conflicting files during upgrade")
 	forceShort := fs.Bool("f", false, "overwrite conflicting files during upgrade")
+	verbose := fs.Bool("verbose", false, "list all conflicting files without truncation")
 	noSync := fs.Bool("no-sync", false, "use cached index.json without syncing first")
 	dryRun := fs.Bool("dry-run", false, "show available updates without installing")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 
@@ -344,7 +402,10 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 		idx, err = loadLocalIndex(cfg)
 	} else {
 		timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
-		idx, err = repo.Sync(cfg.Repo.IndexURL, cfg.LocalIndexPath(), timeout)
+		idx, err = repo.SyncWithLog(cfg.Repo.IndexURL, cfg.LocalIndexPath(), timeout, stdout, styles.out)
+		if err != nil && errors.Is(err, os.ErrPermission) {
+			err = fmt.Errorf("%w (run with sudo or configure cache_dir in pe.ini)", err)
+		}
 	}
 	if err != nil {
 		return err
@@ -382,21 +443,32 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 		}
 		if p, ok := portMap[name]; ok && p.FullVersion() != instVer {
 			needsBuild = append(needsBuild, name)
-			fmt.Fprintf(stderr, "no binary available for %s (%s -> %s) in %s (%s); run: pe build %s\n",
-				name, instVer, p.FullVersion(), cfg.Repo.Repository, cfg.Repo.Tag, name)
+			fmt.Fprintf(stderr, "%s no binary available for %s (%s -> %s) in %s (%s); run: %s\n",
+				styles.err.BoldYellow("warning:"),
+				styles.err.Bold(name),
+				instVer,
+				p.FullVersion(),
+				cfg.Repo.Repository,
+				cfg.Repo.Tag,
+				styles.err.Bold("pe build "+name),
+			)
 		}
 	}
 
 	if len(toUpgrade) == 0 {
 		if len(needsBuild) == 0 {
-			fmt.Fprintln(stdout, "all packages are up to date")
+			fmt.Fprintln(stdout, styles.out.Green("all packages are up to date"))
 		}
 		return nil
 	}
 
 	if *dryRun {
 		for _, e := range toUpgrade {
-			fmt.Fprintf(stdout, "%s %s -> %s\n", e.Pkgname, db.Packages[e.Pkgname].Version, e.FullVersion())
+			fmt.Fprintf(stdout, "%s %s -> %s\n",
+				styles.out.Bold(e.Pkgname),
+				styles.out.Yellow(db.Packages[e.Pkgname].Version),
+				styles.out.Green(e.FullVersion()),
+			)
 		}
 		return nil
 	}
@@ -405,7 +477,7 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
 	for _, entry := range toUpgrade {
 		oldVer := db.Packages[entry.Pkgname].Version
-		localPath, err := repo.FetchBinary(entry, cfg.BinaryCacheDir(), timeout, stdout)
+		localPath, err := repo.FetchBinaryWithStyle(entry, cfg.BinaryCacheDir(), timeout, stdout, styles.out)
 		if err != nil {
 			return err
 		}
@@ -414,6 +486,7 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 			PkgaddConf:    cfg.Paths.PkgaddConf,
 			Upgrade:       true,
 			Force:         doForce,
+			Verbose:       *verbose,
 			SkipRootCheck: rt.SkipRootCheck,
 			SkipLdconfig:  rt.SkipLdconfig,
 			Out:           stdout,
@@ -422,14 +495,19 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "updated %s %s -> %s\n", name, oldVer, newVer)
+		fmt.Fprintf(stdout, "%s %s %s -> %s\n",
+			styles.out.BoldGreen("updated"),
+			styles.out.Bold(name),
+			styles.out.Yellow(oldVer),
+			styles.out.Green(newVer),
+		)
 	}
 	return nil
 }
 
 // --- build (explicit Pkgfile compilation via pe.ini) ---
 
-func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt RuntimeOptions) error {
+func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt RuntimeOptions, styles uiContext) error {
 	fs := flag.NewFlagSet("build", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	install := fs.Bool("install", false, "install built package after building")
@@ -446,7 +524,8 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 	ignoreSig := fs.Bool("ignore-signature", false, "skip .signature verification")
 	keepWork := fs.Bool("keep-work", false, "keep temporary work directory")
 	noStrip := fs.Bool("no-strip", false, "do not strip ELF binaries")
-	if err := fs.Parse(args); err != nil {
+	verbose := fs.Bool("verbose", false, "list all conflicting files without truncation")
+	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 
@@ -462,7 +541,8 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 			return err
 		}
 		if len(missing) > 0 {
-			fmt.Fprintf(stderr, "pe: warning: dependencies not found in ports tree: %s\n", strings.Join(missing, ", "))
+			fmt.Fprintf(stderr, "%s dependencies not found in ports tree: %s\n",
+				styles.err.BoldYellow("pe: warning:"), strings.Join(missing, ", "))
 		}
 		buildList = ordered
 	} else {
@@ -507,6 +587,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 				PkgaddConf:    cfg.Paths.PkgaddConf,
 				Upgrade:       isUpgrade,
 				Force:         doForce,
+				Verbose:       *verbose,
 				SkipRootCheck: rt.SkipRootCheck,
 				SkipLdconfig:  rt.SkipLdconfig,
 				Out:           stdout,
@@ -515,7 +596,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(stdout, "installed %s %s\n", name, ver)
+			fmt.Fprintf(stdout, "%s %s %s\n", styles.out.BoldGreen("installed"), styles.out.Bold(name), styles.out.Cyan(ver))
 		}
 	}
 	return nil
@@ -532,13 +613,13 @@ type searchRecord struct {
 	port        bool
 }
 
-func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer) error {
+func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer, styles uiContext) error {
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	onlyInstalled := fs.Bool("installed", false, "search only installed packages")
 	onlyPorts := fs.Bool("ports", false, "search only local ports tree")
 	onlyBinaries := fs.Bool("binaries", false, "search only binary repository index")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
@@ -559,7 +640,9 @@ func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer) error
 
 	// 1. Binary index
 	if includeAll || *onlyBinaries {
-		if idx, err := repo.Load(cfg.LocalIndexPath()); err == nil {
+		idxPath := cfg.LocalIndexPath()
+		idx, err := repo.Load(idxPath)
+		if err == nil {
 			for _, name := range idx.SortedNames() {
 				entry, ok := repo.Find(idx, name, cfg.Repo.Arch)
 				if !ok {
@@ -574,6 +657,13 @@ func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer) error
 					r.description = entry.Description
 				}
 			}
+		} else if errors.Is(err, os.ErrPermission) {
+			fmt.Fprintf(stderr, "%s cannot read %s: permission denied (run `sudo pe sync` to refresh permissions)\n",
+				styles.err.BoldYellow("pe: warning:"), idxPath)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(stderr, "%s cannot load %s: %v\n", styles.err.BoldYellow("pe: warning:"), idxPath, err)
+		} else if *onlyBinaries {
+			return fmt.Errorf("local index %s not found; run `pe sync` first", idxPath)
 		}
 	}
 
@@ -590,6 +680,8 @@ func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer) error
 					r.description = p.Description
 				}
 			}
+		} else if *onlyPorts {
+			return err
 		}
 	}
 
@@ -603,6 +695,8 @@ func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer) error
 					r.version = db.Packages[name].Version
 				}
 			}
+		} else if *onlyInstalled {
+			return err
 		}
 	}
 
@@ -632,19 +726,28 @@ func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer) error
 		r := records[name]
 		var tags []string
 		if r.installed {
-			tags = append(tags, "installed")
+			tags = append(tags, styles.out.Green("installed"))
 		}
 		if r.binary {
-			tags = append(tags, "bin")
+			tags = append(tags, styles.out.Cyan("bin"))
 		}
 		if r.port {
-			tags = append(tags, "port")
+			tags = append(tags, styles.out.Yellow("port"))
 		}
-		status := strings.Join(tags, ",")
+		status := "[" + strings.Join(tags, ",") + "]"
 		if r.description != "" {
-			fmt.Fprintf(stdout, "%s %s [%s] - %s\n", r.name, r.version, status, r.description)
+			fmt.Fprintf(stdout, "%s %s %s %s\n",
+				styles.out.Bold(r.name),
+				styles.out.Cyan(r.version),
+				status,
+				styles.out.Dim("- "+r.description),
+			)
 		} else {
-			fmt.Fprintf(stdout, "%s %s [%s]\n", r.name, r.version, status)
+			fmt.Fprintf(stdout, "%s %s %s\n",
+				styles.out.Bold(r.name),
+				styles.out.Cyan(r.version),
+				status,
+			)
 		}
 	}
 	return nil
@@ -652,7 +755,7 @@ func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer) error
 
 // --- list (installed, ports, binaries, files, owner, diff) ---
 
-func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer) error {
+func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer, styles uiContext) error {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	listPorts := fs.Bool("ports", false, "list available ports in the local ports tree (CRUX ports -l)")
@@ -660,7 +763,7 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 	listFiles := fs.String("files", "", "list files owned by installed <package> or local <archive>")
 	ownerPattern := fs.String("owner", "", "list package(s) owning files matching <regex>")
 	listDiff := fs.Bool("diff", false, "list version differences between installed packages and binaries/ports")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 
@@ -695,7 +798,11 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		for _, e := range entries {
-			fmt.Fprintln(stdout, e)
+			if idx := strings.LastIndex(e, "/"); idx > 0 && styles.out.Enabled {
+				fmt.Fprintf(stdout, "%s/%s\n", styles.out.Dim(e[:idx]), styles.out.Bold(e[idx+1:]))
+			} else {
+				fmt.Fprintln(stdout, e)
+			}
 		}
 		return nil
 
@@ -706,7 +813,7 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 		}
 		for _, name := range idx.SortedNames() {
 			if e, ok := repo.Find(idx, name, cfg.Repo.Arch); ok {
-				fmt.Fprintf(stdout, "%s %s\n", e.Pkgname, e.FullVersion())
+				fmt.Fprintf(stdout, "%s %s\n", styles.out.Bold(e.Pkgname), styles.out.Cyan(e.FullVersion()))
 			}
 		}
 		return nil
@@ -754,9 +861,9 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 			return nil
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "Package\tFile")
+		fmt.Fprintf(tw, "%s\t%s\n", styles.out.Bold("Package"), styles.out.Bold("File"))
 		for _, m := range matches {
-			fmt.Fprintf(tw, "%s\t%s\n", m.pkg, m.file)
+			fmt.Fprintf(tw, "%s\t%s\n", styles.out.Bold(m.pkg), m.file)
 		}
 		return tw.Flush()
 
@@ -787,10 +894,20 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 			}
 			if availVer != instVer {
 				if !found {
-					fmt.Fprintln(tw, "Source\tName\tAvailable\tInstalled")
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+						styles.out.Bold("Source"),
+						styles.out.Bold("Name"),
+						styles.out.Bold("Available"),
+						styles.out.Bold("Installed"),
+					)
 					found = true
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", source, name, availVer, instVer)
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+					styles.out.Cyan(source),
+					styles.out.Bold(name),
+					styles.out.Green(availVer),
+					styles.out.Yellow(instVer),
+				)
 			}
 		}
 		if !found {
@@ -805,7 +922,7 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		for _, name := range db.SortedNames() {
-			fmt.Fprintf(stdout, "%s %s\n", name, db.Packages[name].Version)
+			fmt.Fprintf(stdout, "%s %s\n", styles.out.Bold(name), styles.out.Cyan(db.Packages[name].Version))
 		}
 		return nil
 	}
@@ -813,10 +930,10 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 
 // --- remove / uninstall ---
 
-func cmdRemove(cfg config.Config, args []string, stdout, stderr io.Writer, rt RuntimeOptions) error {
+func cmdRemove(cfg config.Config, args []string, stdout, stderr io.Writer, rt RuntimeOptions, styles uiContext) error {
 	fs := flag.NewFlagSet("remove", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 	targets := fs.Args()
@@ -832,7 +949,7 @@ func cmdRemove(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 		}); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "removed %s\n", name)
+		fmt.Fprintf(stdout, "%s %s\n", styles.out.BoldGreen("removed"), styles.out.Bold(name))
 	}
 	return nil
 }
@@ -852,8 +969,11 @@ func loadLocalIndex(cfg config.Config) (repo.Index, error) {
 	path := cfg.LocalIndexPath()
 	idx, err := repo.Load(path)
 	if err != nil {
-		if os.IsNotExist(err) || strings.Contains(err.Error(), "no such file") {
+		if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "no such file") {
 			return repo.Index{}, fmt.Errorf("local index %s not found; run `pe sync` first", path)
+		}
+		if errors.Is(err, os.ErrPermission) {
+			return repo.Index{}, fmt.Errorf("cannot read local index %s: permission denied (run `sudo pe sync` to refresh permissions)", path)
 		}
 		return repo.Index{}, err
 	}
@@ -928,6 +1048,61 @@ func resolveBinaryDeps(cfg config.Config, idx repo.Index, targets []string, inst
 		dfs(t)
 	}
 	return ordered
+}
+
+// parseInterspersedFlags allows subcommand flags to appear before or after positional arguments
+// (e.g. `pe install zig --force` works identically to `pe install --force zig`), while preserving
+// `--` as the end-of-flags delimiter.
+func parseInterspersedFlags(fs *flag.FlagSet, args []string) error {
+	type boolFlagger interface {
+		IsBoolFlag() bool
+	}
+	var flags []string
+	var positionals []string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positionals = append(positionals, arg)
+			continue
+		}
+
+		// Flag token: -f, --force, --files=foo, or --files foo
+		trimmed := strings.TrimLeft(arg, "-")
+		name := trimmed
+		hasEq := false
+		if eq := strings.IndexByte(trimmed, '='); eq >= 0 {
+			name = trimmed[:eq]
+			hasEq = true
+		}
+		flags = append(flags, arg)
+		if hasEq {
+			continue
+		}
+		f := fs.Lookup(name)
+		if f != nil {
+			if bf, ok := f.Value.(boolFlagger); ok && bf.IsBoolFlag() {
+				continue
+			}
+			// Value flag expects the next argument.
+			if i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
+		}
+	}
+
+	reordered := make([]string, 0, len(flags)+len(positionals)+1)
+	reordered = append(reordered, flags...)
+	if len(positionals) > 0 {
+		reordered = append(reordered, "--")
+		reordered = append(reordered, positionals...)
+	}
+	return fs.Parse(reordered)
 }
 
 // Keep filepath imported cleanly if needed in future expansions.

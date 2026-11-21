@@ -404,6 +404,25 @@ Override
 to operate on an alternative CRUX installation root (e.g., a mounted
 chroot or staging root).
 .TP
+.BR \-\-color " \fImode\fR"
+Control ANSI color output:
+.B auto
+(enable on interactive terminals unless
+.B NO_COLOR
+is set or
+.BR TERM=dumb ),
+.BR always ,
+or
+.B never
+(default:
+.B [ui] color
+or
+.BR auto ).
+.TP
+.B \-\-no\-color
+Disable ANSI color output (equivalent to
+.BR \-\-color=never ).
+.TP
 .BR \-v ", " \-\-version
 Print version information and exit 0.
 .TP
@@ -431,6 +450,9 @@ without fetching the remote index first.
 .TP
 .B \-\-dry\-run
 Print available binary upgrades without downloading or modifying the system.
+.TP
+.B \-\-verbose
+List all conflicting files without truncation on conflict errors.
 .SS install Options
 .TP
 .BR \-u ", " \-\-upgrade
@@ -452,6 +474,19 @@ or local
 headers), skip dependencies already installed, and install missing
 dependencies first from
 .IR index.json .
+.TP
+.B \-\-verbose
+List every conflicting file path on conflict errors instead of truncating
+output after the first 20 files.
+.PP
+Subcommand options may appear either before or after positional arguments
+(for example,
+.B pe install zig \-\-force
+and
+.B pe install \-\-force zig
+are equivalent); pass
+.B \-\-
+to end option parsing.
 .SS build Options
 .TP
 .BR \-i ", " \-\-install
@@ -508,6 +543,9 @@ after the build completes or fails.
 .TP
 .B \-\-no\-strip
 Disable ELF binary, shared library, and archive stripping.
+.TP
+.B \-\-verbose
+List all conflicting files without truncation when installing a built package.
 .SS search Options
 .TP
 .B \-\-installed
@@ -842,6 +880,16 @@ Extra options appended when invoking
 or
 .B wget
 (default: empty).
+.SS [ui]
+.TP
+.B color
+Default ANSI color mode:
+.BR auto ,
+.BR always ,
+or
+.B never
+(default:
+.BR auto ).
 .SS pkgadd.conf Rules
 .B pe
 parses
@@ -1010,6 +1058,18 @@ is not passed on the command line.
 Setting
 .B PE_CONFIG
 treats the configuration path as explicit (failing if the file cannot be read).
+.TP
+.B NO_COLOR
+When set to any non\-empty value, disables ANSI color output in
+.B auto
+color mode.
+.TP
+.B TERM
+When set to
+.BR dumb ,
+disables ANSI color output in
+.B auto
+color mode.
 .TP
 .B PATH
 Searched for helper utilities used during archive handling, builds, and
