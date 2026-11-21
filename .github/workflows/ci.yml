@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install CRUX archive tooling
+        run: sudo apt-get update && sudo apt-get install -y libarchive-tools zstd xz-utils bzip2 gzip
+      - name: Build and test pe and pe-index
+        run: make verify

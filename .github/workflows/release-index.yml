@@ -1,0 +1,125 @@
+name: Update rolling-x86_64 binary index and release
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_dir:
+        description: Directory containing built CRUX .pkg.tar.<ext> archives
+        required: false
+        default: pkg
+      packages:
+        description: Optional space-separated port names to build before indexing
+        required: false
+        default: ""
+      ports_dir:
+        description: Path to local CRUX ports tree
+        required: false
+        default: ports
+      prune:
+        description: Remove index entries whose archives are not present in package_dir
+        type: boolean
+        required: false
+        default: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  TARGET_REPO: ezke5/packages
+  RELEASE_TAG: rolling-x86_64
+  TARGET_ARCH: x86_64
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install CRUX packaging tools
+        run: sudo apt-get update && sudo apt-get install -y libarchive-tools zstd xz-utils bzip2 gzip curl
+      - name: Build and verify pe tools
+        run: make verify
+      - name: Build requested ports
+        if: ${{ inputs.packages != '' }}
+        env:
+          PACKAGE_DIR: ${{ inputs.package_dir || 'pkg' }}
+          PORTS_DIR: ${{ inputs.ports_dir || 'ports' }}
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          mkdir -p "$PACKAGE_DIR" work sources cache
+          cat > pe.ci.ini <<EOF
+          [paths]
+          ports_dir = $PORTS_DIR
+          cache_dir = cache
+          source_cache = sources
+          package_dir = $PACKAGE_DIR
+          work_dir = work
+
+          [repo]
+          repository = $TARGET_REPO
+          tag = $RELEASE_TAG
+          arch = $TARGET_ARCH
+
+          [build]
+          jobs = $(nproc)
+          cflags = -O2 -march=x86-64 -pipe
+          compression = zst
+          EOF
+          ./bin/pe --config pe.ci.ini build $PACKAGES
+      - name: Generate and merge index.json
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_RELEASE_TOKEN || github.token }}
+          PACKAGE_DIR: ${{ inputs.package_dir || 'pkg' }}
+          PORTS_DIR: ${{ inputs.ports_dir || 'ports' }}
+          PRUNE: ${{ inputs.prune }}
+        run: |
+          mkdir -p "$PACKAGE_DIR"
+          gh release download "$RELEASE_TAG" \
+            --repo "$TARGET_REPO" \
+            --pattern "index.json" \
+            --dir "$PACKAGE_DIR" \
+            --clobber || true
+
+          EXTRA_ARGS=""
+          if [ -d "$PORTS_DIR" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --ports $PORTS_DIR"
+          fi
+          if [ "$PRUNE" = "true" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --prune"
+          fi
+
+          ./bin/pe-index \
+            --packages "$PACKAGE_DIR" \
+            --index "$PACKAGE_DIR/index.json" \
+            --arch "$TARGET_ARCH" \
+            --base-url "https://github.com/$TARGET_REPO/releases/download/$RELEASE_TAG" \
+            $EXTRA_ARGS
+      - name: Publish assets to rolling-x86_64 release
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_RELEASE_TOKEN || github.token }}
+          PACKAGE_DIR: ${{ inputs.package_dir || 'pkg' }}
+        run: |
+          gh release view "$RELEASE_TAG" --repo "$TARGET_REPO" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" \
+              --repo "$TARGET_REPO" \
+              --title "Rolling x86_64 CRUX packages" \
+              --notes "Automated CRUX binary package repository for pe"
+
+          shopt -s nullglob
+          ARCHIVES=(
+            "$PACKAGE_DIR"/*.pkg.tar.zst
+            "$PACKAGE_DIR"/*.pkg.tar.xz
+            "$PACKAGE_DIR"/*.pkg.tar.gz
+            "$PACKAGE_DIR"/*.pkg.tar.bz2
+            "$PACKAGE_DIR"/*.pkg.tar.lz
+          )
+          gh release upload "$RELEASE_TAG" \
+            --repo "$TARGET_REPO" \
+            "$PACKAGE_DIR/index.json" \
+            "${ARCHIVES[@]}" \
+            --clobber
