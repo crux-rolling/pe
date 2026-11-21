@@ -1,5 +1,6 @@
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
+MANDIR ?= $(PREFIX)/share/man
 ETCDIR ?= /etc
 DESTDIR ?=
 
@@ -28,6 +29,8 @@ verify: test build
 install: build
 	install -D -m 0755 bin/pe $(DESTDIR)$(BINDIR)/pe
 	install -D -m 0755 bin/pe-index $(DESTDIR)$(BINDIR)/pe-index
+	install -D -m 0644 man/pe.8 $(DESTDIR)$(MANDIR)/man8/pe.8
+	install -D -m 0644 man/pe-index.8 $(DESTDIR)$(MANDIR)/man8/pe-index.8
 	if [ ! -f $(DESTDIR)$(ETCDIR)/pe.ini ]; then \
 		install -D -m 0644 pe.ini.example $(DESTDIR)$(ETCDIR)/pe.ini; \
 	fi
