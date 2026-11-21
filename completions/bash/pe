@@ -1,0 +1,485 @@
+# Bash completion for pe and pe-index (CRUX Linux binary-first package manager)
+# Zero external dependencies (no jq, no bash-completion required).
+
+_pe_ini_get() {
+	local file="$1" want_sec="$2" want_key="$3"
+	[[ -r "$file" ]] || return 1
+
+	local line sec="" key val
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		# Trim leading/trailing whitespace
+		line="${line#"${line%%[![:space:]]*}"}"
+		line="${line%"${line##*[![:space:]]}"}"
+		[[ -z "$line" || "$line" == \#* || "$line" == \;* ]] && continue
+
+		if [[ "$line" == \[*\]* ]]; then
+			sec="${line#\[}"
+			sec="${sec%%\]*}"
+			sec="${sec#"${sec%%[![:space:]]*}"}"
+			sec="${sec%"${sec##*[![:space:]]}"}"
+			sec="${sec,,}"
+			continue
+		fi
+
+		[[ "$line" == *=* ]] || continue
+		key="${line%%=*}"
+		val="${line#*=}"
+		key="${key#"${key%%[![:space:]]*}"}"
+		key="${key%"${key##*[![:space:]]}"}"
+		key="${key,,}"
+
+		# Match requested section (paths also allowed before any section header)
+		if [[ "$sec" != "$want_sec" && ! ( "$want_sec" == "paths" && -z "$sec" ) ]]; then
+			continue
+		fi
+		[[ "$key" == "$want_key" ]] || continue
+
+		# Trim whitespace and strip whitespace-preceded inline comments
+		val="${val#"${val%%[![:space:]]*}"}"
+		if [[ "$val" != \"*\" && "$val" != \'*\' ]]; then
+			val="${val%%[[:space:]]#*}"
+			val="${val%%[[:space:]];*}"
+		fi
+		val="${val%"${val##*[![:space:]]}"}"
+		if [[ ( "$val" == \"*\" && ${#val} -ge 2 ) || ( "$val" == \'*\' && ${#val} -ge 2 ) ]]; then
+			val="${val:1:${#val}-2}"
+		fi
+		printf '%s\n' "$val"
+		return 0
+	done < "$file"
+	return 1
+}
+
+_pe_resolve_paths() {
+	local cfg_file="${PE_CONFIG:-/etc/pe.ini}"
+	local root_override=""
+	local i w
+	for (( i = 1; i < cword; i++ )); do
+		w="${words[i]}"
+		case "$w" in
+			-c|--config)
+				if (( i + 1 < cword )); then
+					cfg_file="${words[i+1]}"
+					(( i++ ))
+				fi
+				;;
+			--config=*)
+				cfg_file="${w#--config=}"
+				;;
+			-r|--root)
+				if (( i + 1 < cword )); then
+					root_override="${words[i+1]}"
+					(( i++ ))
+				fi
+				;;
+			--root=*)
+				root_override="${w#--root=}"
+				;;
+			sync|update|install|build|search|list|remove|uninstall|rm|help|version)
+				break
+				;;
+		esac
+	done
+
+	_pe_cfg_root="$(_pe_ini_get "$cfg_file" paths root 2>/dev/null || printf '/')"
+	[[ -n "$root_override" ]] && _pe_cfg_root="$root_override"
+	_pe_cfg_root="${_pe_cfg_root%/}"
+
+	_pe_cfg_ports_dir="$(_pe_ini_get "$cfg_file" paths ports_dir 2>/dev/null || printf '/usr/ports')"
+	_pe_cfg_collections="$(_pe_ini_get "$cfg_file" paths collections 2>/dev/null || printf 'core opt xorg contrib')"
+	_pe_cfg_cache_dir="$(_pe_ini_get "$cfg_file" paths cache_dir 2>/dev/null || printf '/var/cache/pe')"
+	_pe_cfg_ports_conf_dir="$(_pe_ini_get "$cfg_file" paths ports_conf_dir 2>/dev/null || printf '/etc/ports')"
+}
+
+_pe_installed_pkgs() {
+	local db="${_pe_cfg_root}/var/lib/pkg/db"
+	[[ -r "$db" ]] || return 0
+
+	local line state=0
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		if [[ -z "$line" ]]; then
+			state=0
+			continue
+		fi
+		if (( state == 0 )); then
+			printf '%s\n' "$line"
+			state=1
+		fi
+	done < "$db"
+}
+
+_pe_index_pkgs() {
+	local idx="${_pe_cfg_cache_dir}/index.json"
+	[[ -r "$idx" ]] || return 0
+
+	local line rest name
+	local -A seen=()
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		rest="$line"
+		while [[ "$rest" == *'"pkgname"'* ]]; do
+			rest="${rest#*\"pkgname\"}"
+			if [[ "$rest" =~ ^[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+				name="${BASH_REMATCH[1]}"
+				if [[ -n "$name" && -z "${seen[$name]+x}" ]]; then
+					seen["$name"]=1
+					printf '%s\n' "$name"
+				fi
+				rest="${rest#*"\"${name}\""}"
+			else
+				break
+			fi
+		done
+	done < "$idx"
+}
+
+_pe_port_names() {
+	local ports_dir="$_pe_cfg_ports_dir"
+	[[ -d "$ports_dir" ]] || return 0
+
+	local cols="${_pe_cfg_collections//,/ }"
+	local old_nullglob
+	old_nullglob=$(shopt -p nullglob)
+	shopt -s nullglob
+
+	local -A seen=()
+	local col dir port qual
+	local found_col=0
+	for col in $cols; do
+		if [[ -d "${ports_dir}/${col}" ]]; then
+			found_col=1
+			for dir in "${ports_dir}/${col}"/*; do
+				[[ -f "${dir}/Pkgfile" ]] || continue
+				port="${dir##*/}"
+				qual="${col}/${port}"
+				if [[ -z "${seen[$port]+x}" ]]; then
+					seen["$port"]=1
+					printf '%s\n' "$port"
+				fi
+				if [[ -z "${seen[$qual]+x}" ]]; then
+					seen["$qual"]=1
+					printf '%s\n' "$qual"
+				fi
+			done
+		fi
+	done
+
+	if (( found_col == 0 )); then
+		for dir in "${ports_dir}"/* "${ports_dir}"/*/*; do
+			[[ -f "${dir}/Pkgfile" ]] || continue
+			port="${dir##*/}"
+			qual="${dir#"${ports_dir}/"}"
+			if [[ -z "${seen[$port]+x}" ]]; then
+				seen["$port"]=1
+				printf '%s\n' "$port"
+			fi
+			if [[ "$qual" != "$port" && -z "${seen[$qual]+x}" ]]; then
+				seen["$qual"]=1
+				printf '%s\n' "$qual"
+			fi
+		done
+	fi
+
+	eval "$old_nullglob"
+}
+
+_pe_collections_list() {
+	local conf_dir="$_pe_cfg_ports_conf_dir"
+	local ports_dir="$_pe_cfg_ports_dir"
+	local old_nullglob
+	old_nullglob=$(shopt -p nullglob)
+	shopt -s nullglob
+
+	local -A seen=()
+	local f base col
+	if [[ -d "$conf_dir" ]]; then
+		for f in "${conf_dir}"/*.*; do
+			[[ -f "$f" ]] || continue
+			base="${f##*/}"
+			col="${base%.*}"
+			if [[ -n "$col" && -z "${seen[$col]+x}" ]]; then
+				seen["$col"]=1
+				printf '%s\n' "$col"
+			fi
+		done
+	fi
+	if [[ -d "$ports_dir" ]]; then
+		for f in "${ports_dir}"/*; do
+			[[ -d "$f" ]] || continue
+			col="${f##*/}"
+			[[ "$col" == .* ]] && continue
+			if [[ -z "${seen[$col]+x}" ]]; then
+				seen["$col"]=1
+				printf '%s\n' "$col"
+			fi
+		done
+	fi
+
+	eval "$old_nullglob"
+}
+
+_pe_local_archives() {
+	local prefix="$1"
+	local old_nullglob
+	old_nullglob=$(shopt -p nullglob)
+	shopt -s nullglob
+
+	local f
+	for f in "${prefix}"*.pkg.tar.gz "${prefix}"*.pkg.tar.bz2 "${prefix}"*.pkg.tar.xz "${prefix}"*.pkg.tar.lz "${prefix}"*.pkg.tar.zst; do
+		[[ -f "$f" ]] && printf '%s\n' "$f"
+	done
+	for f in "${prefix}"*; do
+		[[ -d "$f" ]] && printf '%s/\n' "${f%/}"
+	done
+
+	eval "$old_nullglob"
+}
+
+_pe_local_pkgfiles() {
+	local prefix="$1"
+	local old_nullglob
+	old_nullglob=$(shopt -p nullglob)
+	shopt -s nullglob
+
+	local f
+	if [[ -f "${prefix}Pkgfile" ]]; then
+		printf '%s\n' "${prefix}Pkgfile"
+	fi
+	for f in "${prefix}"*; do
+		if [[ -d "$f" && -f "${f}/Pkgfile" ]]; then
+			printf '%s\n' "${f%/}"
+		elif [[ -f "$f" && "${f##*/}" == "Pkgfile" ]]; then
+			printf '%s\n' "$f"
+		fi
+	done
+
+	eval "$old_nullglob"
+}
+
+_pe_completions() {
+	local cur prev words cword split=false
+	if declare -F _init_completion >/dev/null 2>&1; then
+		_init_completion -s || return
+	else
+		cur="${COMP_WORDS[COMP_CWORD]}"
+		prev=""
+		if (( COMP_CWORD > 0 )); then
+			prev="${COMP_WORDS[COMP_CWORD-1]}"
+		fi
+		words=("${COMP_WORDS[@]}")
+		cword=$COMP_CWORD
+		if [[ "$cur" == --*=* ]]; then
+			prev="${cur%%=*}"
+			cur="${cur#*=}"
+			split=true
+		fi
+	fi
+
+	local global_opts="-c --config -r --root --color --no-color -v --version -h --help"
+	local subcommands="sync update install build search list remove uninstall rm help version"
+
+	# Determine active subcommand (scanning past global options)
+	local cmd="" cmd_idx=0 i w
+	for (( i = 1; i < cword; i++ )); do
+		w="${words[i]}"
+		case "$w" in
+			-c|--config|-r|--root|--color)
+				(( i++ ))
+				;;
+			--config=*|--root=*|--color=*|--no-color|-v|--version|-h|--help)
+				;;
+			-*)
+				;;
+			*)
+				cmd="$w"
+				cmd_idx=$i
+				break
+				;;
+		esac
+	done
+
+	local _pe_cfg_root _pe_cfg_ports_dir _pe_cfg_collections _pe_cfg_cache_dir _pe_cfg_ports_conf_dir
+	_pe_resolve_paths
+
+	# Handle value-taking global options before subcommand
+	if [[ -z "$cmd" ]]; then
+		case "$prev" in
+			-c|--config)
+				COMPREPLY=( $(compgen -f -- "$cur") )
+				return
+				;;
+			-r|--root)
+				COMPREPLY=( $(compgen -d -- "$cur") )
+				return
+				;;
+			--color)
+				COMPREPLY=( $(compgen -W "auto always never" -- "$cur") )
+				return
+				;;
+		esac
+		if [[ "$cur" == -* ]]; then
+			COMPREPLY=( $(compgen -W "$global_opts" -- "$cur") )
+		else
+			COMPREPLY=( $(compgen -W "$subcommands" -- "$cur") )
+		fi
+		return
+	fi
+
+	# Check whether `--` end-of-options appeared after subcommand
+	local after_ddash=0
+	for (( i = cmd_idx + 1; i < cword; i++ )); do
+		if [[ "${words[i]}" == "--" ]]; then
+			after_ddash=1
+			break
+		fi
+	done
+
+	local candidates=""
+	case "$cmd" in
+		sync)
+			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
+				COMPREPLY=( $(compgen -W "--ports" -- "$cur") )
+				return
+			fi
+			candidates="$(_pe_collections_list)"
+			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
+			return
+			;;
+
+		update)
+			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
+				COMPREPLY=( $(compgen -W "-f --force --verbose --no-sync --dry-run" -- "$cur") )
+				return
+			fi
+			candidates="$(_pe_installed_pkgs)"
+			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
+			return
+			;;
+
+		install)
+			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
+				COMPREPLY=( $(compgen -W "-u --upgrade -f --force --verbose --deps" -- "$cur") )
+				return
+			fi
+			candidates="$(_pe_index_pkgs)"$'\n'"$(_pe_local_archives "$cur")"
+			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
+			return
+			;;
+
+		build)
+			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
+				COMPREPLY=( $(compgen -W "-i --install -u --upgrade -f --force --deps --ignore-footprint --ignore-new --update-footprint --ignore-md5sum --ignore-signature --keep-work --no-strip --verbose" -- "$cur") )
+				return
+			fi
+			candidates="$(_pe_port_names)"$'\n'"$(_pe_local_pkgfiles "$cur")"
+			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
+			return
+			;;
+
+		search)
+			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
+				COMPREPLY=( $(compgen -W "--installed --ports --binaries" -- "$cur") )
+				return
+			fi
+			local s_inst=0 s_ports=0 s_bins=0
+			for (( i = cmd_idx + 1; i < cword; i++ )); do
+				case "${words[i]}" in
+					--installed) s_inst=1 ;;
+					--ports) s_ports=1 ;;
+					--binaries) s_bins=1 ;;
+				esac
+			done
+			if (( s_inst )); then
+				candidates="$(_pe_installed_pkgs)"
+			elif (( s_ports )); then
+				candidates="$(_pe_port_names)"
+			elif (( s_bins )); then
+				candidates="$(_pe_index_pkgs)"
+			else
+				candidates="$(_pe_index_pkgs)"$'\n'"$(_pe_port_names)"$'\n'"$(_pe_installed_pkgs)"
+			fi
+			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
+			return
+			;;
+
+		list)
+			if (( ! after_ddash )); then
+				case "$prev" in
+					--files|-files)
+						candidates="$(_pe_installed_pkgs)"$'\n'"$(_pe_local_archives "$cur")"
+						COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
+						return
+						;;
+					--owner|-owner)
+						return
+						;;
+				esac
+				if [[ "$cur" == -* ]]; then
+					COMPREPLY=( $(compgen -W "--ports --binaries --files --owner --diff" -- "$cur") )
+					return
+				fi
+			fi
+			local has_ports_flag=0
+			for (( i = cmd_idx + 1; i < cword; i++ )); do
+				[[ "${words[i]}" == "--ports" || "${words[i]}" == "-ports" ]] && has_ports_flag=1
+			done
+			if (( has_ports_flag )); then
+				candidates="$(_pe_collections_list)"
+				COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
+			fi
+			return
+			;;
+
+		remove|uninstall|rm)
+			candidates="$(_pe_installed_pkgs)"
+			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
+			return
+			;;
+
+		help|version)
+			return
+			;;
+	esac
+}
+
+_pe_index_completions() {
+	local cur prev words cword split=false
+	if declare -F _init_completion >/dev/null 2>&1; then
+		_init_completion -s || return
+	else
+		cur="${COMP_WORDS[COMP_CWORD]}"
+		prev=""
+		if (( COMP_CWORD > 0 )); then
+			prev="${COMP_WORDS[COMP_CWORD-1]}"
+		fi
+		words=("${COMP_WORDS[@]}")
+		cword=$COMP_CWORD
+		if [[ "$cur" == --*=* || "$cur" == -*=* ]]; then
+			prev="${cur%%=*}"
+			cur="${cur#*=}"
+			split=true
+		fi
+	fi
+
+	case "$prev" in
+		--index|-index)
+			COMPREPLY=( $(compgen -f -- "$cur") )
+			return
+			;;
+		--packages|-packages|--ports|-ports)
+			COMPREPLY=( $(compgen -d -- "$cur") )
+			return
+			;;
+		--arch|-arch)
+			COMPREPLY=( $(compgen -W "x86_64 aarch64 arm64 i686 riscv64 any" -- "$cur") )
+			return
+			;;
+		--base-url|-base-url)
+			return
+			;;
+	esac
+
+	COMPREPLY=( $(compgen -W "--index --packages --ports --base-url --arch --prune -h --help" -- "$cur") )
+}
+
+complete -F _pe_completions pe
+complete -F _pe_index_completions pe-index
