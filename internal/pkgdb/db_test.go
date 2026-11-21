@@ -145,14 +145,46 @@ func TestConflictDetectionAndSharedRemoval(t *testing.T) {
 }
 
 func TestPkgaddConfRules(t *testing.T) {
-	// Parse CRUX's real reference pkgadd.conf to verify 100% compatibility (including \w).
-	refConf := filepath.Join("..", "..", "..", "pkgutils", "pkgadd.conf")
+	// Self-contained copy of standard CRUX pkgadd.conf (including \w) so tests
+	// pass in standalone CI checkouts without sibling reference directories.
+	cruxPkgaddConf := `#
+# /etc/pkgadd.conf: pkgadd(8) configuration
+#
+
+UPGRADE		^etc/.*$		NO
+UPGRADE		^var/log/.*$		NO
+UPGRADE		^var/spool/\w*cron/.*$	NO
+UPGRADE		^var/run/utmp$		NO
+
+UPGRADE		^etc/ports/drivers/.*$	YES
+UPGRADE		^etc/X11/.*$		YES
+
+UPGRADE		^etc/rc.*$		YES
+UPGRADE		^etc/rc\.local$		NO
+UPGRADE		^etc/rc\.modules$	NO
+UPGRADE		^etc/rc\.conf$		NO
+UPGRADE		^etc/rc\.d/net$		NO
+UPGRADE		^etc/rc\.d/wlan$	NO
+
+UPGRADE		^etc/udev/rules.d/.*$	YES
+UPGRADE		^etc/udev/rules.d/1.*$	NO
+UPGRADE		^etc/udev/hwdb.d/.*$	YES
+UPGRADE		^etc/udev/hwdb.bin$	YES
+
+UPGRADE		^etc/ssl/cert.pem$	YES
+
+UPGRADE		^var/lib/pkg/prt-get.locker$	NO
+`
+	refConf := filepath.Join(t.TempDir(), "pkgadd.conf")
+	if err := os.WriteFile(refConf, []byte(cruxPkgaddConf), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	rules, err := ReadRules("/", refConf)
 	if err != nil {
-		t.Fatalf("ReadRules on reference pkgadd.conf failed: %v", err)
+		t.Fatalf("ReadRules on CRUX pkgadd.conf fixture failed: %v", err)
 	}
 	if len(rules) == 0 {
-		t.Fatalf("expected non-empty rules from reference pkgadd.conf")
+		t.Fatalf("expected non-empty rules from CRUX pkgadd.conf fixture")
 	}
 
 	files := map[string]struct{}{
