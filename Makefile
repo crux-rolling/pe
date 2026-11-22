@@ -14,7 +14,7 @@ GO_SRCS := $(shell find cmd internal -type f -name '*.go') go.mod
 
 all: build
 
-build: bin/pe bin/pe-index
+build: bin/pe bin/pe-index bin/kryx-src
 
 bin/pe: $(GO_SRCS)
 	@mkdir -p bin
@@ -24,6 +24,10 @@ bin/pe-index: $(GO_SRCS)
 	@mkdir -p bin
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/pe-index
 
+bin/kryx-src: $(GO_SRCS)
+	@mkdir -p bin
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/kryx-src
+
 test:
 	go test -v ./...
 
@@ -32,8 +36,10 @@ verify: test build
 install: build
 	install -D -m 0755 bin/pe $(DESTDIR)$(BINDIR)/pe
 	install -D -m 0755 bin/pe-index $(DESTDIR)$(BINDIR)/pe-index
+	install -D -m 0755 bin/kryx-src $(DESTDIR)$(BINDIR)/kryx-src
 	install -D -m 0644 man/pe.8 $(DESTDIR)$(MANDIR)/man8/pe.8
 	install -D -m 0644 man/pe-index.8 $(DESTDIR)$(MANDIR)/man8/pe-index.8
+	install -D -m 0644 man/kryx-src.8 $(DESTDIR)$(MANDIR)/man8/kryx-src.8
 	install -D -m 0644 completions/bash/pe $(DESTDIR)$(BASHCOMPDIR)/pe
 	ln -sf pe $(DESTDIR)$(BASHCOMPDIR)/pe-index
 	install -D -m 0644 completions/bash/pe.profile.sh $(DESTDIR)$(PROFILED)/pe-completion.sh
@@ -44,8 +50,10 @@ install: build
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/pe \
 	      $(DESTDIR)$(BINDIR)/pe-index \
+	      $(DESTDIR)$(BINDIR)/kryx-src \
 	      $(DESTDIR)$(MANDIR)/man8/pe.8 \
 	      $(DESTDIR)$(MANDIR)/man8/pe-index.8 \
+	      $(DESTDIR)$(MANDIR)/man8/kryx-src.8 \
 	      $(DESTDIR)$(BASHCOMPDIR)/pe \
 	      $(DESTDIR)$(BASHCOMPDIR)/pe-index \
 	      $(DESTDIR)$(PROFILED)/pe-completion.sh

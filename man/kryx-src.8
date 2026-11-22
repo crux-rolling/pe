@@ -1,0 +1,85 @@
+.TH KRYX\-SRC 8 "November 2026" "kryx-linux" "System Administration"
+.SH NAME
+kryx\-src \- unified CRUX/KryX source build, linting, and release\-staging machine
+.SH SYNOPSIS
+.B kryx\-src
+.I command
+.RI [ options ]
+.RI [ args ...\& ]
+.SH DESCRIPTION
+.B kryx\-src
+is a standalone static Go source\-building and release\-staging companion to
+.BR pe (8),
+inspired by Void Linux's
+.BR xbps\-src .
+It shares
+.BR pe 's
+internal Pkgfile parser, builder, package database, and repository indexer while
+adding a canonical port registry that resolves ports uniformly by directory path,
+basename, declared
+.B Pkgfile
+.BR name= ,
+or collection prefix, across both multi\-collection trees and single\-port repositories.
+.SH COMMANDS
+.TP
+.B pkg \fR[\fIoptions\fR] \fItarget\fR ... \fR(alias: \fBbuild\fR)
+Expand
+.I target
+arguments (port path, basename, package name, collection name, or
+.BR all ),
+optionally resolve recursive dependencies in topological order
+.RB ( \-\-deps ),
+satisfy uninstalled dependencies binary\-first from
+.I index.json
+(or from source with
+.BR \-\-source\-deps ),
+and compile target archives into
+.IR \-\-out\-dir .
+.TP
+.B lint \fR[\fB\-\-ports \fIdir\fR] [\fB\-\-strict\fR] [\fItarget\fR ...] \fR(alias: \fBcheck\fR)
+Validate
+.B Pkgfile
+recipes across a ports tree, detecting missing required fields, directory\-vs\-name
+mismatches, duplicate package names within a collection, missing dependency targets,
+and dependency cycles.
+.TP
+.B list \fR[\fB\-\-ports \fIdir\fR] [\fB\-\-json\fR] [\fItarget\fR ...] \fR(alias: \fBls\fR)
+List discovered ports with their relative directory path, package name (when it
+differs from the directory basename), and full version.
+.TP
+.B stage \fR[\fIoptions\fR] \fR(alias: \fBindex\fR)
+Scan
+.I \-\-packages
+for CRUX
+.I .pkg.tar.<ext>
+archives, enrich metadata from
+.IR \-\-ports ,
+merge into
+.IR \-\-index ,
+and optionally copy archives into
+.I \-\-upload\-dir
+with GitHub\-Releases\-safe filenames
+.RB ( #
+replaced by
+.BR . ).
+.TP
+.B rewrite\-urls \-\-index \fIpath\fR \-\-assets\-json \fIfile\fR \fR[\fB\-\-packages \fIdir\fR]
+Update download URLs in
+.I index.json
+using the JSON payload returned by
+.B gh release view \-\-json assets
+and verify that every built archive resolves to an uploaded asset URL.
+.SH EXAMPLES
+.RS
+.PP
+.nf
+kryx\-src lint \-\-ports /usr/ports
+kryx\-src pkg \-\-ports ./ports \-\-work\-root /tmp/work \-\-out\-dir ./dist/packages \-\-deps \-\-force linux\-6.18
+kryx\-src stage \-\-packages ./dist/packages \-\-ports ./ports \-\-index ./stage/index.json \-\-upload\-dir ./stage/upload
+kryx\-src rewrite\-urls \-\-index ./stage/index.json \-\-assets\-json ./stage/assets.json \-\-packages ./dist/packages
+.fi
+.RE
+.SH SEE ALSO
+.BR pe (8),
+.BR pe\-index (8),
+.BR gports (8)

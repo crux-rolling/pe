@@ -1,0 +1,338 @@
+// Command kryx-src is a unified xbps-src-style source build, linting, and
+// release-staging machine for KryX/CRUX Linux ports trees.
+package main
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"github.com/kryx-linux/pe/internal/cli"
+	"github.com/kryx-linux/pe/internal/srcmachine"
+)
+
+func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printUsage(stdout)
+		return 2
+	}
+
+	switch args[0] {
+	case "-h", "--help", "help":
+		printUsage(stdout)
+		return 0
+	case "-v", "--version", "version":
+		fmt.Fprintf(stdout, "kryx-src %s\n", cli.Version)
+		return 0
+	case "pkg", "build":
+		if err := cmdPkg(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "kryx-src: %v\n", err)
+			return 1
+		}
+		return 0
+	case "lint", "check":
+		if err := cmdLint(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "kryx-src: %v\n", err)
+			return 1
+		}
+		return 0
+	case "list", "ls":
+		if err := cmdList(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "kryx-src: %v\n", err)
+			return 1
+		}
+		return 0
+	case "stage", "index":
+		if err := cmdStage(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "kryx-src: %v\n", err)
+			return 1
+		}
+		return 0
+	case "rewrite-urls":
+		if err := cmdRewriteURLs(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "kryx-src: %v\n", err)
+			return 1
+		}
+		return 0
+	default:
+		fmt.Fprintf(stderr, "kryx-src: unknown command %q\n\n", args[0])
+		printUsage(stderr)
+		return 2
+	}
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprint(w, `usage: kryx-src <command> [options] [args...]
+
+Unified xbps-src-style source build, linting, and release-staging machine for KryX/CRUX ports.
+
+Commands:
+  pkg, build       Resolve targets/deps via canonical registry and build .pkg.tar.<ext> archives
+  lint, check      Validate Pkgfiles, dir/name alignment, duplicate names, deps, and cycles
+  list, ls         List discovered ports (relative path, Pkgfile name, version)
+  stage, index     Generate/update index.json and optional GitHub-safe release upload assets
+  rewrite-urls     Rewrite index.json URLs from GitHub release assets JSON and verify built archives
+  version          Print version and exit
+  help             Show this help message
+
+Run 'kryx-src <command> --help' for command-specific flags.
+`)
+}
+
+func cmdPkg(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("pkg", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	portsDir := fs.String("ports", "/usr/ports", "ports tree directory or single-port repo root")
+	collections := fs.String("collections", "", "comma-separated collection priority order (empty = auto-discover)")
+	repoHint := fs.String("port-repo", "", "optional source repo slug hint (e.g. kryx-linux/kernel)")
+	workRoot := fs.String("work-root", "", "isolated build work root (contains cache/sources/work/packages)")
+	outDir := fs.String("out-dir", "", "output directory for built .pkg.tar.<ext> archives")
+	root := fs.String("root", "/", "target CRUX rootfs for installing build dependencies")
+	cfgPath := fs.String("config", "", "optional base pe.ini configuration file")
+	repository := fs.String("repo", "kryx-linux/ports", "binary repository slug for index.json dep reuse")
+	releaseTag := fs.String("tag", "rolling-x86_64", "binary release tag")
+	arch := fs.String("arch", "x86_64", "target architecture")
+	jobs := fs.Int("jobs", 0, "parallel build jobs (0 = nproc)")
+	compression := fs.String("compression", "zst", "package archive compression (zst, xz, gz, bz2, lz)")
+	cflags := fs.String("cflags", "", "override CFLAGS")
+	cxxflags := fs.String("cxxflags", "", "override CXXFLAGS")
+	syncIndex := fs.Bool("sync-index", false, "sync remote binary index.json before resolving build deps")
+	deps := fs.Bool("deps", false, "resolve and satisfy recursive Pkgfile dependencies")
+	sourceDeps := fs.Bool("source-deps", false, "build missing dependencies from source instead of binary index")
+	force := fs.Bool("force", false, "force rebuild even if archive is up to date")
+	install := fs.Bool("install", false, "install built target package(s) into --root")
+	ignoreFP := fs.Bool("ignore-footprint", false, "skip .footprint verification")
+	ignoreNew := fs.Bool("ignore-new", false, "allow NEW files during .footprint check")
+	updateFP := fs.Bool("update-footprint", false, "regenerate .footprint from build output")
+	ignoreMD5 := fs.Bool("ignore-md5sum", false, "skip .md5sum verification")
+	keepWork := fs.Bool("keep-work", false, "preserve work directory after build")
+	noStrip := fs.Bool("no-strip", false, "disable ELF stripping")
+	dryRun := fs.Bool("dry-run", false, "resolve and print build plan without compiling")
+	colorMode := fs.String("color", "auto", "color output mode: auto, always, never")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	targets := fs.Args()
+	if len(targets) == 0 {
+		return fmt.Errorf("usage: kryx-src pkg [options] <port|collection|all...>")
+	}
+
+	res, err := srcmachine.Build(srcmachine.BuildOptions{
+		PortsDir:        *portsDir,
+		Collections:     splitCSV(*collections),
+		Targets:         targets,
+		RepoHint:        *repoHint,
+		WorkRoot:        *workRoot,
+		OutDir:          *outDir,
+		Root:            *root,
+		BaseConfigPath:  *cfgPath,
+		Repository:      *repository,
+		ReleaseTag:      *releaseTag,
+		Arch:            *arch,
+		Jobs:            *jobs,
+		Compression:     *compression,
+		CFLAGS:          *cflags,
+		CXXFLAGS:        *cxxflags,
+		SyncBinaryIndex: *syncIndex,
+		WithDeps:        *deps,
+		SourceDeps:      *sourceDeps,
+		Force:           *force,
+		Install:         *install,
+		IgnoreFootprint: *ignoreFP,
+		IgnoreNew:       *ignoreNew,
+		UpdateFootprint: *updateFP,
+		IgnoreMD5Sum:    *ignoreMD5,
+		IgnoreSignature: true,
+		KeepWork:        *keepWork,
+		NoStrip:         *noStrip,
+		DryRun:          *dryRun,
+		ColorMode:       *colorMode,
+		Out:             stdout,
+		ErrOut:          stderr,
+	})
+	if err != nil {
+		return err
+	}
+	if !*dryRun && len(res.BuiltArchives) == 0 {
+		return fmt.Errorf("build produced no .pkg.tar.* archives")
+	}
+	for _, a := range res.BuiltArchives {
+		fmt.Fprintf(stdout, "BUILT %s\n", a)
+	}
+	return nil
+}
+
+func cmdLint(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("lint", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	portsDir := fs.String("ports", "/usr/ports", "ports tree directory or single-port repo root")
+	collections := fs.String("collections", "", "comma-separated collection list")
+	strict := fs.Bool("strict", false, "treat warnings (e.g. dir!=name, missing deps) as errors")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	reg, err := srcmachine.LoadRegistry(*portsDir, splitCSV(*collections))
+	if err != nil {
+		return err
+	}
+
+	var entries []srcmachine.Entry
+	if fs.NArg() > 0 {
+		entries, err = reg.ExpandTargets(fs.Args(), "")
+		if err != nil {
+			return err
+		}
+	}
+
+	report := srcmachine.Lint(reg, entries)
+	for _, iss := range report.Issues {
+		if iss.Severity == srcmachine.SeverityError {
+			fmt.Fprintln(stderr, iss.String())
+		} else {
+			fmt.Fprintln(stdout, iss.String())
+		}
+	}
+	fmt.Fprintf(stdout, "Linted %d port(s): %d error(s), %d warning(s)\n",
+		report.Checked, report.ErrorCount(), report.WarningCount())
+
+	if report.ErrorCount() > 0 || (*strict && report.WarningCount() > 0) {
+		return fmt.Errorf("lint failed with %d error(s) and %d warning(s)", report.ErrorCount(), report.WarningCount())
+	}
+	return nil
+}
+
+func cmdList(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	portsDir := fs.String("ports", "/usr/ports", "ports tree directory or single-port repo root")
+	collections := fs.String("collections", "", "comma-separated collection list")
+	asJSON := fs.Bool("json", false, "output structured JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	reg, err := srcmachine.LoadRegistry(*portsDir, splitCSV(*collections))
+	if err != nil {
+		return err
+	}
+	entries := reg.Entries
+	if fs.NArg() > 0 {
+		entries, err = reg.ExpandTargets(fs.Args(), "")
+		if err != nil {
+			return err
+		}
+	}
+
+	if *asJSON {
+		type jsonEntry struct {
+			RelDir      string   `json:"rel_dir"`
+			Name        string   `json:"name"`
+			Version     string   `json:"version"`
+			Release     string   `json:"release"`
+			Collection  string   `json:"collection,omitempty"`
+			Description string   `json:"description,omitempty"`
+			Depends     []string `json:"depends,omitempty"`
+		}
+		out := make([]jsonEntry, 0, len(entries))
+		for _, e := range entries {
+			out = append(out, jsonEntry{
+				RelDir:      e.RelDir,
+				Name:        e.Port.Name,
+				Version:     e.Port.Version,
+				Release:     e.Port.Release,
+				Collection:  e.Port.Collection,
+				Description: e.Port.Description,
+				Depends:     e.Port.Depends,
+			})
+		}
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(out)
+	}
+
+	for _, e := range entries {
+		if e.Base != "" && e.Port.Name != "" && e.Base != e.Port.Name && !reg.IsSinglePort {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\n", e.RelDir, e.Port.Name, e.Port.FullVersion())
+		} else {
+			fmt.Fprintf(stdout, "%s\t%s\n", e.RelDir, e.Port.FullVersion())
+		}
+	}
+	return nil
+}
+
+func cmdStage(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("stage", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	packagesDir := fs.String("packages", ".", "directory containing built .pkg.tar.<ext> archives")
+	portsDir := fs.String("ports", "", "optional ports directory for description/depends/collection enrichment")
+	indexPath := fs.String("index", "index.json", "path to index.json to create or update")
+	uploadDir := fs.String("upload-dir", "", "optional directory to stage GitHub-safe ('#' -> '.') upload copies")
+	baseURL := fs.String("base-url", "", "base download URL for index entries")
+	arch := fs.String("arch", "x86_64", "package architecture")
+	prune := fs.Bool("prune", false, "remove index entries missing from --packages")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	res, err := srcmachine.Stage(srcmachine.StageOptions{
+		PackagesDir: *packagesDir,
+		PortsDir:    *portsDir,
+		IndexPath:   *indexPath,
+		UploadDir:   *uploadDir,
+		BaseURL:     *baseURL,
+		Arch:        *arch,
+		Prune:       *prune,
+		ErrOut:      stderr,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Staged %d package(s) into %s\n", res.IndexedCount, *indexPath)
+	return nil
+}
+
+func cmdRewriteURLs(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("rewrite-urls", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	indexPath := fs.String("index", "index.json", "path to index.json to rewrite")
+	assetsJSON := fs.String("assets-json", "", "path to JSON file from `gh release view --json assets`")
+	packagesDir := fs.String("packages", "", "optional built packages dir to verify URL resolution")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*assetsJSON) == "" {
+		return fmt.Errorf("--assets-json is required")
+	}
+	if err := srcmachine.RewriteReleaseURLs(*indexPath, *assetsJSON, *packagesDir); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Verified and updated download URLs in %s\n", *indexPath)
+	return nil
+}
+
+func splitCSV(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
