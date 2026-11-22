@@ -572,15 +572,15 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 
 	// Expand targets: each target may be a single port (found recursively at any depth)
 	// or a directory/collection under ports_dir containing nested Pkgfiles.
-	var expandedTargets []string
 	var directPorts []ports.Port
 	targetNames := make(map[string]bool)
+	targetDirs := make(map[string]bool)
 	for _, t := range targets {
 		p, err := ports.Find(cfg.Paths.PortsDir, cfg.Paths.Collections, t)
 		if err == nil {
-			expandedTargets = append(expandedTargets, p.QualifiedName())
 			directPorts = append(directPorts, p)
 			targetNames[p.Name] = true
+			targetDirs[p.Dir] = true
 			continue
 		}
 		group, gerr := ports.FindGroup(cfg.Paths.PortsDir, t)
@@ -589,9 +589,9 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 		}
 		if len(group) > 0 {
 			for _, gp := range group {
-				expandedTargets = append(expandedTargets, gp.QualifiedName())
 				directPorts = append(directPorts, gp)
 				targetNames[gp.Name] = true
+				targetDirs[gp.Dir] = true
 			}
 			continue
 		}
@@ -600,7 +600,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 
 	var buildList []ports.Port
 	if doDeps {
-		ordered, missing, err := ports.ResolveDeps(cfg.Paths.PortsDir, cfg.Paths.Collections, expandedTargets)
+		ordered, missing, err := ports.ResolveDepsForPorts(cfg.Paths.PortsDir, cfg.Paths.Collections, directPorts)
 		if err != nil {
 			return err
 		}
@@ -646,7 +646,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
 
 	for _, p := range buildList {
-		isTarget := targetNames[p.Name]
+		isTarget := targetDirs[p.Dir] || targetNames[p.Name]
 
 		// Handle dependency ports (not explicitly targeted):
 		// 1) Skip if already installed in <root>/var/lib/pkg/db.

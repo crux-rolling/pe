@@ -156,3 +156,57 @@ func TestRecursiveDeepNestedSymlinkAndGroupDiscovery(t *testing.T) {
 		t.Fatalf("unexpected FindGroup result: %+v", group)
 	}
 }
+
+func TestDirNameMismatchPkgfileNameAndResolveDeps(t *testing.T) {
+	portsDir := t.TempDir()
+
+	writePort := func(relDir, body string) {
+		dir := filepath.Join(portsDir, filepath.FromSlash(relDir))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "Pkgfile"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writePort("core/bc", "name=bc\nversion=1.07\nrelease=1\nsource=()\nbuild() { true; }\n")
+	writePort("rolling/linux-6.18", "# Depends on: bc\nname=kernel\nversion=6.18.64\nrelease=2\nsource=()\nbuild() { true; }\n")
+	writePort("rolling/meta-boot", "# Depends on: kernel\nname=meta-boot\nversion=1.0\nrelease=1\nsource=()\nbuild() { true; }\n")
+
+	for _, query := range []string{"linux-6.18", "rolling/linux-6.18", "kernel", "rolling/kernel"} {
+		p, err := Find(portsDir, nil, query)
+		if err != nil {
+			t.Fatalf("Find(%q) failed: %v", query, err)
+		}
+		if p.Name != "kernel" || p.Collection != "rolling" || p.RelDir != "rolling/linux-6.18" {
+			t.Fatalf("Find(%q) = %+v", query, p)
+		}
+	}
+
+	root, err := Find(portsDir, nil, "linux-6.18")
+	if err != nil {
+		t.Fatalf("Find(linux-6.18): %v", err)
+	}
+	ordered, missing, err := ResolveDepsForPorts(portsDir, nil, []Port{root})
+	if err != nil {
+		t.Fatalf("ResolveDepsForPorts(linux-6.18): %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("unexpected missing deps: %v", missing)
+	}
+	if len(ordered) != 2 || ordered[0].Name != "bc" || ordered[1].Name != "kernel" {
+		t.Fatalf("unexpected order for linux-6.18: %+v", ordered)
+	}
+
+	orderedMeta, missingMeta, err := ResolveDeps(portsDir, nil, []string{"meta-boot"})
+	if err != nil {
+		t.Fatalf("ResolveDeps(meta-boot): %v", err)
+	}
+	if len(missingMeta) != 0 {
+		t.Fatalf("unexpected missing deps for meta-boot: %v", missingMeta)
+	}
+	if len(orderedMeta) != 3 || orderedMeta[0].Name != "bc" || orderedMeta[1].Name != "kernel" || orderedMeta[2].Name != "meta-boot" {
+		t.Fatalf("unexpected order for meta-boot: %+v", orderedMeta)
+	}
+}

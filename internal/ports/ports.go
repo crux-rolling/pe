@@ -21,6 +21,7 @@ type Port struct {
 	Version     string
 	Release     string
 	Collection  string
+	RelDir      string
 	Dir         string
 	Description string
 	URL         string
@@ -45,6 +46,15 @@ func (p Port) QualifiedName() string {
 		return p.Name
 	}
 	return p.Collection + "/" + p.Name
+}
+
+// PortPath returns the port's relative directory path under ports_dir when known,
+// falling back to QualifiedName().
+func (p Port) PortPath() string {
+	if p.RelDir != "" {
+		return p.RelDir
+	}
+	return p.QualifiedName()
 }
 
 type dirID struct {
@@ -217,7 +227,60 @@ func Find(portsDir string, collections []string, target string) (Port, error) {
 		return ParsePkgfile(matched, portsDir)
 	}
 
+	// Fallback: match by declared Pkgfile `name=` (handling ports whose directory
+	// name differs from their package name, e.g. rolling/linux-6.18 declaring name=kernel).
+	if matched, ok := findByPkgfileName(portsDir, collections, target); ok {
+		return ParsePkgfile(matched, portsDir)
+	}
+
 	return Port{}, fmt.Errorf("port %q not found in %s", target, portsDir)
+}
+
+func findByPkgfileName(portsDir string, collections []string, target string) (string, bool) {
+	normTarget := filepath.ToSlash(strings.Trim(target, "/"))
+	wantCol := ""
+	wantName := normTarget
+	if slash := strings.LastIndex(normTarget, "/"); slash >= 0 {
+		wantCol = normTarget[:slash]
+		wantName = normTarget[slash+1:]
+	}
+	if wantName == "" {
+		return "", false
+	}
+
+	// Build priority-ordered search roots (configured collections first, then full tree).
+	var entries []string
+	seen := make(map[string]bool)
+	if wantCol != "" {
+		colDir := filepath.Join(portsDir, filepath.FromSlash(wantCol))
+		if fi, err := os.Stat(colDir); err == nil && fi.IsDir() {
+			_ = walkPkgfiles(portsDir, colDir, wantCol, seen, &entries)
+		}
+	} else {
+		for _, col := range collections {
+			colDir := filepath.Join(portsDir, col)
+			if fi, err := os.Stat(colDir); err == nil && fi.IsDir() {
+				_ = walkPkgfiles(portsDir, colDir, col, seen, &entries)
+			}
+		}
+		_ = walkPkgfiles(portsDir, portsDir, "", seen, &entries)
+	}
+
+	for _, rel := range entries {
+		dir := filepath.Join(portsDir, filepath.FromSlash(rel))
+		p, err := ParsePkgfileFast(dir, portsDir)
+		if err != nil {
+			continue
+		}
+		if p.Name != wantName {
+			continue
+		}
+		if wantCol != "" && p.Collection != wantCol {
+			continue
+		}
+		return dir, true
+	}
+	return "", false
 }
 
 // FindGroup expands target into all nested ports when target is a collection/directory
@@ -287,6 +350,7 @@ func ParsePkgfile(portDir, portsDir string) (Port, error) {
 		return Port{}, err
 	}
 	p.Dir = portDir
+	p.RelDir = inferRelDir(portDir, portsDir)
 	p.Collection = inferCollection(portDir, portsDir)
 
 	if err := evalPkgfileBash(&p, portDir); err != nil {
@@ -304,6 +368,7 @@ func ParsePkgfileFast(portDir, portsDir string) (Port, error) {
 		return Port{}, err
 	}
 	p.Dir = portDir
+	p.RelDir = inferRelDir(portDir, portsDir)
 	p.Collection = inferCollection(portDir, portsDir)
 
 	data, err := os.ReadFile(pkgfile)
@@ -354,42 +419,67 @@ func ParsePkgfileFast(portDir, portsDir string) (Port, error) {
 
 // ResolveDeps resolves recursive Pkgfile dependencies in post-order (dependencies first).
 func ResolveDeps(portsDir string, collections []string, targets []string) (ordered []Port, missing []string, err error) {
+	roots := make([]Port, 0, len(targets))
+	for _, t := range targets {
+		p, findErr := Find(portsDir, collections, t)
+		if findErr != nil {
+			return nil, nil, findErr
+		}
+		roots = append(roots, p)
+	}
+	return ResolveDepsForPorts(portsDir, collections, roots)
+}
+
+// ResolveDepsForPorts resolves recursive Pkgfile dependencies for already-discovered
+// root ports in post-order (dependencies first), avoiding lossy re-lookups when a
+// port's directory name differs from its Pkgfile `name=`.
+func ResolveDepsForPorts(portsDir string, collections []string, roots []Port) (ordered []Port, missing []string, err error) {
 	visited := make(map[string]bool)
 	visiting := make(map[string]bool)
 	missingSet := make(map[string]bool)
 
-	var dfs func(name string, isRoot bool) error
-	dfs = func(name string, isRoot bool) error {
+	var visitPort func(p Port) error
+	var dfsName func(name string) error
+
+	visitPort = func(p Port) error {
+		key := p.Name
+		if key == "" {
+			key = p.Dir
+		}
+		if visited[key] || visiting[key] {
+			return nil
+		}
+		visiting[key] = true
+		for _, dep := range p.Depends {
+			if err := dfsName(dep); err != nil {
+				return err
+			}
+		}
+		delete(visiting, key)
+		if !visited[key] {
+			visited[key] = true
+			ordered = append(ordered, p)
+		}
+		return nil
+	}
+
+	dfsName = func(name string) error {
 		if visited[name] || visiting[name] {
 			return nil
 		}
 		p, findErr := Find(portsDir, collections, name)
 		if findErr != nil {
-			if isRoot {
-				return findErr
-			}
 			if !missingSet[name] {
 				missingSet[name] = true
 				missing = append(missing, name)
 			}
 			return nil
 		}
-		visiting[p.Name] = true
-		for _, dep := range p.Depends {
-			if err := dfs(dep, false); err != nil {
-				return err
-			}
-		}
-		delete(visiting, p.Name)
-		if !visited[p.Name] {
-			visited[p.Name] = true
-			ordered = append(ordered, p)
-		}
-		return nil
+		return visitPort(p)
 	}
 
-	for _, t := range targets {
-		if err := dfs(t, true); err != nil {
+	for _, r := range roots {
+		if err := visitPort(r); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -613,6 +703,21 @@ done
 		return fmt.Errorf("%s/Pkgfile: function 'build' not specified", portDir)
 	}
 	return nil
+}
+
+func inferRelDir(portDir, portsDir string) string {
+	if portsDir == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(portsDir, portDir)
+	if err != nil {
+		return ""
+	}
+	rel = filepath.ToSlash(rel)
+	if rel == "." || strings.HasPrefix(rel, "../") {
+		return ""
+	}
+	return rel
 }
 
 func inferCollection(portDir, portsDir string) string {
