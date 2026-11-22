@@ -1,4 +1,4 @@
-// Package repo manages the binary repository index.json published on ezke5/packages
+// Package repo manages the binary repository index.json published on kryx-linux/packages
 // (release tag rolling-x86_64) and SHA-256 verified binary downloads.
 package repo
 
