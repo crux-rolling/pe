@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ezke5/pe/internal/archive"
-	"github.com/ezke5/pe/internal/pkgdb"
-	"github.com/ezke5/pe/internal/repo"
+	"github.com/kryx-linux/pe/internal/archive"
+	"github.com/kryx-linux/pe/internal/pkgdb"
+	"github.com/kryx-linux/pe/internal/repo"
 )
 
 func createPkgArchive(t *testing.T, dir, name, verRel string, files map[string]string) (string, string, int64) {
