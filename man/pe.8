@@ -1,4 +1,4 @@
-.TH PE 8 "November 2026" "crux-rolling" "System Administration"
+.TH PE 8 "November 2026" "kryx-linux" "System Administration"
 .SH NAME
 pe, pe\-index \- CRUX Linux binary\-first package manager and repository indexer
 .SH SYNOPSIS
@@ -61,7 +61,7 @@ Package installation and system updates are strictly binary\-first against
 the remote JSON repository index
 .RI ( index.json ),
 defaulting to the
-.B ezke5/packages
+.B kryx-linux/packages
 release tag
 .BR rolling\-x86_64 .
 If no prebuilt binary exists in
@@ -385,7 +385,7 @@ pointer, and writes the resulting JSON atomically.
           "pkgrel": "1",
           "arch": "x86_64",
           "filename": "zlib#1.3.1\-1.pkg.tar.zst",
-          "url": "https://github.com/ezke5/packages/releases/download/rolling\-x86_64/zlib%231.3.1\-1.pkg.tar.zst",
+          "url": "https://github.com/kryx-linux/packages/releases/download/rolling\-x86_64/zlib%231.3.1\-1.pkg.tar.zst",
           "sha256": "<hex\-sha256>",
           "size": 123456,
           "description": "Compression library",
@@ -769,7 +769,7 @@ Directory containing executable CRUX port sync drivers (default:
 .TP
 .B repository
 GitHub repository slug hosting binary releases (default:
-.BR ezke5/packages ).
+.BR kryx-linux/packages ).
 .TP
 .B tag
 Release tag containing
@@ -803,7 +803,7 @@ are set, it is derived automatically from those values.
 Default:
 .RS
 .nf
-https://github.com/ezke5/packages/releases/download/rolling\-x86_64/index.json
+https://github.com/kryx-linux/packages/releases/download/rolling\-x86_64/index.json
 .fi
 .RE
 .TP
@@ -1346,7 +1346,7 @@ pe\-index \e
   \-\-ports /usr/ports \e
   \-\-index ./pkg/index.json \e
   \-\-arch x86_64 \e
-  \-\-base\-url https://github.com/ezke5/packages/releases/download/rolling\-x86_64 \e
+  \-\-base\-url https://github.com/kryx-linux/packages/releases/download/rolling\-x86_64 \e
   \-\-prune
 .fi
 .RE

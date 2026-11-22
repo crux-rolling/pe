@@ -7,7 +7,7 @@ PROFILED ?= $(ETCDIR)/profile.d
 DESTDIR ?=
 
 VERSION ?= 0.1.0
-LDFLAGS := -s -w -X github.com/ezke5/pe/internal/cli.Version=$(VERSION)
+LDFLAGS := -s -w -X github.com/kryx-linux/pe/internal/cli.Version=$(VERSION)
 GO_SRCS := $(shell find cmd internal -type f -name '*.go') go.mod
 
 .PHONY: all build test verify clean install uninstall

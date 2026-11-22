@@ -35,7 +35,7 @@ ports_conf_dir = /etc/ports
 ports_drivers_dir = /etc/ports/drivers
 
 [repo]
-# Binary repository release index (ezke5/packages rolling-x86_64)
+# Binary repository release index (kryx-linux/packages rolling-x86_64)
 repository = kryx-linux/packages
 tag = rolling-x86_64
 arch = x86_64
