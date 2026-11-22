@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ezke5/pe/internal/archive"
-	"github.com/ezke5/pe/internal/pkgdb"
+	"github.com/kryx-linux/pe/internal/archive"
+	"github.com/kryx-linux/pe/internal/pkgdb"
 )
 
 func buildTestPkg(t *testing.T, dir, name, verRel string, files map[string]string) string {
