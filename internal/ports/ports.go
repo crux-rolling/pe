@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // Port holds parsed metadata from a CRUX Pkgfile.
@@ -46,65 +47,100 @@ func (p Port) QualifiedName() string {
 	return p.Collection + "/" + p.Name
 }
 
-// ListEntries discovers all Pkgfiles under portsDir in place, returning sorted
-// relative port paths matching CRUX `ports -l` (e.g. "core/zlib", "opt/git").
+type dirID struct {
+	dev uint64
+	ino uint64
+}
+
+// walkPkgfiles recursively finds all directories containing a Pkgfile under searchRoot,
+// following symlinks (matching CRUX `find -follow`) with cycle protection.
+func walkPkgfiles(portsDir, searchRoot, prefix string, seen map[string]bool, out *[]string) error {
+	visited := make(map[dirID]bool)
+
+	var walk func(cur string) error
+	walk = func(cur string) error {
+		info, err := os.Stat(cur)
+		if err != nil || !info.IsDir() {
+			return nil
+		}
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			id := dirID{dev: uint64(st.Dev), ino: uint64(st.Ino)}
+			if visited[id] {
+				return nil
+			}
+			visited[id] = true
+		}
+
+		entries, err := os.ReadDir(cur)
+		if err != nil {
+			return nil
+		}
+		for _, e := range entries {
+			name := e.Name()
+			full := filepath.Join(cur, name)
+			if name == "Pkgfile" {
+				if fi, err := os.Stat(full); err == nil && !fi.IsDir() {
+					rel, err := filepath.Rel(portsDir, cur)
+					if err == nil {
+						rel = filepath.ToSlash(rel)
+						if rel == "." {
+							rel = filepath.Base(portsDir)
+						}
+						if prefix != "" && !strings.HasPrefix(rel, prefix+"/") && rel != prefix {
+							rel = prefix + "/" + rel
+						}
+						if !seen[rel] {
+							seen[rel] = true
+							*out = append(*out, rel)
+						}
+					}
+				}
+				continue
+			}
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			// Follow symlinks to directories via os.Stat.
+			fi, err := os.Stat(full)
+			if err != nil || !fi.IsDir() {
+				continue
+			}
+			_ = walk(full)
+		}
+		return nil
+	}
+
+	return walk(searchRoot)
+}
+
+// ListEntries discovers all Pkgfiles under portsDir recursively in place (following symlinks),
+// returning sorted relative port paths matching CRUX `ports -l` (e.g. "core/zlib", "opt/git").
 func ListEntries(portsDir string, collections []string) ([]string, error) {
-	if _, err := os.Stat(portsDir); err != nil {
+	info, err := os.Stat(portsDir)
+	if err != nil {
 		return nil, fmt.Errorf("ports directory %q not found: %w", portsDir, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("ports path %q is not a directory", portsDir)
 	}
 
 	var entries []string
 	seen := make(map[string]bool)
 
-	addFromRoot := func(searchRoot, prefix string) error {
-		return filepath.WalkDir(searchRoot, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() {
-				name := d.Name()
-				if strings.HasPrefix(name, ".") && path != searchRoot {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if d.Name() != "Pkgfile" {
-				return nil
-			}
-			dir := filepath.Dir(path)
-			rel, err := filepath.Rel(portsDir, dir)
-			if err != nil {
-				return nil
-			}
-			rel = filepath.ToSlash(rel)
-			if rel == "." {
-				rel = filepath.Base(portsDir)
-			}
-			if prefix != "" && !strings.HasPrefix(rel, prefix+"/") && rel != prefix {
-				rel = prefix + "/" + rel
-			}
-			if !seen[rel] {
-				seen[rel] = true
-				entries = append(entries, rel)
-			}
-			return nil
-		})
-	}
-
 	if len(collections) > 0 {
 		foundAnyCollectionDir := false
 		for _, col := range collections {
 			colDir := filepath.Join(portsDir, col)
-			if info, err := os.Stat(colDir); err == nil && info.IsDir() {
+			if ci, err := os.Stat(colDir); err == nil && ci.IsDir() {
 				foundAnyCollectionDir = true
-				_ = addFromRoot(colDir, col)
+				_ = walkPkgfiles(portsDir, colDir, col, seen, &entries)
 			}
 		}
 		if !foundAnyCollectionDir {
-			_ = addFromRoot(portsDir, "")
+			_ = walkPkgfiles(portsDir, portsDir, "", seen, &entries)
 		}
 	} else {
-		_ = addFromRoot(portsDir, "")
+		_ = walkPkgfiles(portsDir, portsDir, "", seen, &entries)
 	}
 
 	sort.Strings(entries)
@@ -133,27 +169,40 @@ func DiscoverAll(portsDir string, collections []string) ([]Port, error) {
 	return result, nil
 }
 
-// Find locates a single port by name (or "collection/name") honoring collections priority order.
+// Find locates a single port by name or relative path, honoring collections priority order
+// and falling back to a full recursive search (following symlinks) under portsDir.
 func Find(portsDir string, collections []string, target string) (Port, error) {
 	target = strings.TrimSpace(target)
+	target = strings.TrimSuffix(target, "/")
 	if target == "" {
 		return Port{}, fmt.Errorf("empty port name")
 	}
 
-	// Explicit collection/port path
+	// Explicit path under portsDir (e.g. "core/zlib" or "extra/dev/gports")
 	if strings.Contains(target, "/") {
 		dir := filepath.Join(portsDir, filepath.FromSlash(target))
 		if _, err := os.Stat(filepath.Join(dir, "Pkgfile")); err == nil {
 			return ParsePkgfile(dir, portsDir)
 		}
-		return Port{}, fmt.Errorf("port %q not found in %s", target, portsDir)
+		// Also accept a direct existing filesystem path to a port dir or Pkgfile.
+		directDir := target
+		if filepath.Base(directDir) == "Pkgfile" {
+			directDir = filepath.Dir(directDir)
+		}
+		if _, err := os.Stat(filepath.Join(directDir, "Pkgfile")); err == nil {
+			return ParsePkgfile(directDir, portsDir)
+		}
 	}
 
-	// Priority order by configured collections
+	// Priority order by configured collections (direct and nested within each collection)
 	for _, col := range collections {
 		dir := filepath.Join(portsDir, col, target)
 		if _, err := os.Stat(filepath.Join(dir, "Pkgfile")); err == nil {
 			return ParsePkgfile(dir, portsDir)
+		}
+		colRoot := filepath.Join(portsDir, col)
+		if matched, ok := findRecursiveMatch(portsDir, colRoot, col, target); ok {
+			return ParsePkgfile(matched, portsDir)
 		}
 	}
 
@@ -163,25 +212,70 @@ func Find(portsDir string, collections []string, target string) (Port, error) {
 		return ParsePkgfile(direct, portsDir)
 	}
 
-	// Fallback scan of all collections under portsDir
-	dirs, err := os.ReadDir(portsDir)
-	if err == nil {
-		var names []string
-		for _, d := range dirs {
-			if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
-				names = append(names, d.Name())
-			}
-		}
-		sort.Strings(names)
-		for _, col := range names {
-			dir := filepath.Join(portsDir, col, target)
-			if _, err := os.Stat(filepath.Join(dir, "Pkgfile")); err == nil {
-				return ParsePkgfile(dir, portsDir)
-			}
-		}
+	// Full recursive scan of portsDir at arbitrary depth (following symlinks)
+	if matched, ok := findRecursiveMatch(portsDir, portsDir, "", target); ok {
+		return ParsePkgfile(matched, portsDir)
 	}
 
 	return Port{}, fmt.Errorf("port %q not found in %s", target, portsDir)
+}
+
+// FindGroup expands target into all nested ports when target is a collection/directory
+// under portsDir containing one or more Pkgfiles (e.g. `pe build gports` where gports/
+// holds multiple sub-ports). Returns nil, nil if target is not a directory with nested ports.
+func FindGroup(portsDir, target string) ([]Port, error) {
+	target = strings.TrimSpace(target)
+	target = strings.TrimSuffix(target, "/")
+	if target == "" {
+		return nil, nil
+	}
+	groupDir := filepath.Join(portsDir, filepath.FromSlash(target))
+	info, err := os.Stat(groupDir)
+	if err != nil || !info.IsDir() {
+		return nil, nil
+	}
+	var entries []string
+	seen := make(map[string]bool)
+	_ = walkPkgfiles(portsDir, groupDir, "", seen, &entries)
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	sort.Strings(entries)
+	result := make([]Port, 0, len(entries))
+	for _, rel := range entries {
+		dir := filepath.Join(portsDir, filepath.FromSlash(rel))
+		p, err := ParsePkgfile(dir, portsDir)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, p)
+	}
+	return result, nil
+}
+
+func findRecursiveMatch(portsDir, searchRoot, prefix, target string) (string, bool) {
+	var entries []string
+	seen := make(map[string]bool)
+	_ = walkPkgfiles(portsDir, searchRoot, prefix, seen, &entries)
+	if len(entries) == 0 {
+		return "", false
+	}
+	// Prefer exact relative match, then basename/suffix match with shortest depth first.
+	sort.Slice(entries, func(i, j int) bool {
+		di := strings.Count(entries[i], "/")
+		dj := strings.Count(entries[j], "/")
+		if di != dj {
+			return di < dj
+		}
+		return entries[i] < entries[j]
+	})
+	normTarget := filepath.ToSlash(target)
+	for _, rel := range entries {
+		if rel == normTarget || strings.HasSuffix(rel, "/"+normTarget) {
+			return filepath.Join(portsDir, filepath.FromSlash(rel)), true
+		}
+	}
+	return "", false
 }
 
 // ParsePkgfile parses header comments and evaluates name/version/release/source/renames

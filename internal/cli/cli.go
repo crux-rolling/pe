@@ -534,9 +534,34 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 		return fmt.Errorf("usage: pe build [options] <port...>")
 	}
 
+	// Expand targets: each target may be a single port (found recursively at any depth)
+	// or a directory/collection under ports_dir containing nested Pkgfiles.
+	var expandedTargets []string
+	var directPorts []ports.Port
+	for _, t := range targets {
+		p, err := ports.Find(cfg.Paths.PortsDir, cfg.Paths.Collections, t)
+		if err == nil {
+			expandedTargets = append(expandedTargets, p.QualifiedName())
+			directPorts = append(directPorts, p)
+			continue
+		}
+		group, gerr := ports.FindGroup(cfg.Paths.PortsDir, t)
+		if gerr != nil {
+			return gerr
+		}
+		if len(group) > 0 {
+			for _, gp := range group {
+				expandedTargets = append(expandedTargets, gp.QualifiedName())
+				directPorts = append(directPorts, gp)
+			}
+			continue
+		}
+		return err
+	}
+
 	var buildList []ports.Port
 	if *withDeps {
-		ordered, missing, err := ports.ResolveDeps(cfg.Paths.PortsDir, cfg.Paths.Collections, targets)
+		ordered, missing, err := ports.ResolveDeps(cfg.Paths.PortsDir, cfg.Paths.Collections, expandedTargets)
 		if err != nil {
 			return err
 		}
@@ -546,13 +571,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 		}
 		buildList = ordered
 	} else {
-		for _, t := range targets {
-			p, err := ports.Find(cfg.Paths.PortsDir, cfg.Paths.Collections, t)
-			if err != nil {
-				return err
-			}
-			buildList = append(buildList, p)
-		}
+		buildList = directPorts
 	}
 
 	doInstall := *install || *installShort

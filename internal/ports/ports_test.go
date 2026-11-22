@@ -91,3 +91,68 @@ build() {
 		t.Fatalf("missing = %v, want [missinglib]", missing)
 	}
 }
+
+func TestRecursiveDeepNestedSymlinkAndGroupDiscovery(t *testing.T) {
+	base := t.TempDir()
+	portsDir := filepath.Join(base, "ports")
+
+	// Deeply nested port (depth 3: extra/dev/gports/Pkgfile)
+	deepDir := filepath.Join(portsDir, "extra", "dev", "gports")
+	if err := os.MkdirAll(deepDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deepDir, "Pkgfile"), []byte("name=gports\nversion=1.2.3\nrelease=1\nsource=()\nbuild() { true; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlinked external collection + symlink cycle guard
+	extCol := filepath.Join(base, "external_col", "symport")
+	if err := os.MkdirAll(extCol, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extCol, "Pkgfile"), []byte("name=symport\nversion=0.1\nrelease=1\nsource=()\nbuild() { true; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "external_col"), filepath.Join(portsDir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	// Create a symlink loop back to portsDir to verify cycle protection
+	if err := os.Symlink(portsDir, filepath.Join(portsDir, "loop")); err != nil {
+		t.Fatal(err)
+	}
+
+	// ListEntries must discover both deep port and symlinked port without looping
+	entries, err := ListEntries(portsDir, nil)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	wantEntries := []string{"extra/dev/gports", "linked/symport"}
+	if !reflect.DeepEqual(entries, wantEntries) {
+		t.Fatalf("entries = %v, want %v", entries, wantEntries)
+	}
+
+	// Find must locate deeply nested "gports" by bare name and symlinked "symport"
+	p, err := Find(portsDir, nil, "gports")
+	if err != nil {
+		t.Fatalf("Find(gports) failed: %v", err)
+	}
+	if p.Name != "gports" || p.Collection != "extra/dev" {
+		t.Fatalf("unexpected deep port: %+v", p)
+	}
+	sp, err := Find(portsDir, nil, "symport")
+	if err != nil {
+		t.Fatalf("Find(symport) failed: %v", err)
+	}
+	if sp.Name != "symport" || sp.Collection != "linked" {
+		t.Fatalf("unexpected symlinked port: %+v", sp)
+	}
+
+	// FindGroup must expand a collection/subdirectory ("extra") into all nested ports
+	group, err := FindGroup(portsDir, "extra")
+	if err != nil {
+		t.Fatalf("FindGroup(extra) failed: %v", err)
+	}
+	if len(group) != 1 || group[0].Name != "gports" {
+		t.Fatalf("unexpected FindGroup result: %+v", group)
+	}
+}
