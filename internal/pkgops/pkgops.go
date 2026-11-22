@@ -7,8 +7,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/ezke5/pe/internal/archive"
-	"github.com/ezke5/pe/internal/pkgdb"
+	"github.com/kryx-linux/pe/internal/archive"
+	"github.com/kryx-linux/pe/internal/pkgdb"
 )
 
 // DefaultMaxConflictsDisplayed limits conflict lines printed to stderr unless Verbose is set.
