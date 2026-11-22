@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ezke5/pe/internal/ui"
+	"github.com/kryx-linux/pe/internal/ui"
 )
 
 // Index matches the established index.json schema used for binary package releases,
