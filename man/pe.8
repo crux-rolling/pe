@@ -91,8 +91,28 @@ from a CRUX ports tree, and generate or update
 .SH COMMANDS
 All commands accept global options
 .RB ( \-c /\-\-config ,
-.BR \-r /\-\-root )
+.BR \-r /\-\-root ,
+.BR \-\-color ,
+.BR \-\-no\-color )
 before the subcommand name.
+Each subcommand has short aliases for quick typing:
+.B sy
+.RB ( sync ),
+.B up
+.RB ( update ),
+.BR in / i
+.RB ( install ),
+.BR bld / b
+.RB ( build ),
+.BR se / s
+.RB ( search ),
+.BR ls / l
+.RB ( list ),
+.BR rm / r / uninstall
+.RB ( remove ),
+and
+.B h
+.RB ( help ).
 .TP
 .B sync \fR[\fB\-\-ports\fR] [\fIcollection\fR ...]
 Download the remote
@@ -430,7 +450,7 @@ Print version information and exit 0.
 Print usage summary and exit 0.
 .SS sync Options
 .TP
-.B \-\-ports
+.BR \-p ", " \-\-ports
 In addition to downloading
 .IR index.json ,
 run CRUX port collection sync drivers in
@@ -443,29 +463,35 @@ Overwrite conflicting files during binary upgrades (still honoring
 rules from
 .IR pkgadd.conf ).
 .TP
-.B \-\-no\-sync
+.BR \-n ", " \-\-no\-sync
 Use the already cached
 .I index.json
 without fetching the remote index first.
 .TP
-.B \-\-dry\-run
+.BR \-d ", " \-\-dry\-run
 Print available binary upgrades without downloading or modifying the system.
 .TP
-.B \-\-verbose
+.BR \-v ", " \-\-verbose
 List all conflicting files without truncation on conflict errors.
 .SS install Options
 .TP
 .BR \-u ", " \-\-upgrade
 Upgrade an already installed package.
 Required if the package is already present in
-.IR /var/lib/pkg/db ;
-rejected if the package is not yet installed.
+.IR /var/lib/pkg/db
+(unless
+.B \-\-reinstall
+is used); rejected if the package is not yet installed.
+.TP
+.BR \-R ", " \-\-reins ", " \-\-reinstall
+Reinstall package(s) even if already installed (upgrades in place when
+present, or performs a fresh install if absent).
 .TP
 .BR \-f ", " \-\-force
 Remove and overwrite conflicting files owned by other packages or already
 present on disk.
 .TP
-.B \-\-deps
+.BR \-d ", " \-\-deps
 Recursively resolve dependencies (from
 .I index.json
 .B depends
@@ -475,7 +501,7 @@ headers), skip dependencies already installed, and install missing
 dependencies first from
 .IR index.json .
 .TP
-.B \-\-verbose
+.BR \-v ", " \-\-verbose
 List every conflicting file path on conflict errors instead of truncating
 output after the first 20 files.
 .PP
@@ -490,29 +516,60 @@ to end option parsing.
 .SS build Options
 .TP
 .BR \-i ", " \-\-install
-Install each built package after building (automatically upgrades if the
-package is already installed in the database).
+Install each built target package after building (automatically upgrades
+if the package is already installed in the database).
 .TP
 .BR \-u ", " \-\-upgrade
-Upgrade each built package after building (requires the package to be
-previously installed).
+Upgrade each built target package after building (requires the package to
+be previously installed).
+.TP
+.BR \-R ", " \-\-reins ", " \-\-reinstall
+Force rebuilding the target port(s) and reinstall them into
+.I root
+whether previously installed or not.
 .TP
 .BR \-f ", " \-\-force
-Force rebuilding even if the target archive is up to date, and pass
+Force rebuilding target ports even if the target archive is up to date,
+and pass
 .B \-\-force
 when installing.
 .TP
-.B \-\-deps
+.BR \-d ", " \-\-deps
 Resolve recursive
 .B Pkgfile
-dependencies and build them in topological order before the requested ports.
+dependencies in topological order.
+Already\-installed dependencies are skipped.
+Uninstalled dependencies are installed into
+.I root
+before building downstream ports (using prebuilt binaries from synced
+.I index.json
+when available unless
+.B \-\-source\-deps
+is set, otherwise building them from
+.I ports_dir
+and installing the resulting archive).
+Requested target ports are always built from source and only installed
+when
+.BR \-i / \-\-install ,
+.BR \-u / \-\-upgrade ,
+or
+.BR \-R / \-\-reinstall
+is passed.
 .TP
-.B \-\-ignore\-footprint
+.BR \-S ", " \-\-source\-deps
+With
+.BR \-d / \-\-deps ,
+always build missing dependencies from
+.I ports_dir
+instead of reusing prebuilt binaries from
+.IR index.json .
+.TP
+.BR \-if ", " \-\-ignore\-footprint
 Skip
 .I .footprint
 verification after creating the archive.
 .TP
-.B \-\-ignore\-new
+.BR \-in ", " \-\-ignore\-new
 Allow
 .B NEW
 files during
@@ -521,65 +578,65 @@ verification while still failing on
 .B MISSING
 files.
 .TP
-.B \-\-update\-footprint
+.BR \-uf ", " \-\-update\-footprint
 Regenerate and overwrite
 .I .footprint
 in the port directory from the built archive.
 .TP
-.B \-\-ignore\-md5sum
+.BR \-im ", " \-\-ignore\-md5sum
 Skip
 .I .md5sum
 verification of source files.
 .TP
-.B \-\-ignore\-signature
+.BR \-is ", " \-\-ignore\-signature
 Skip
 .I .signature
 cryptographic verification.
 .TP
-.B \-\-keep\-work
+.BR \-kw ", " \-\-keep\-work
 Keep
 .I <work_dir>/<name>
 after the build completes or fails.
 .TP
-.B \-\-no\-strip
+.BR \-ns ", " \-\-no\-strip
 Disable ELF binary, shared library, and archive stripping.
 .TP
-.B \-\-verbose
-List all conflicting files without truncation when installing a built package.
+.BR \-v ", " \-\-verbose
+List all conflicting files without truncation when installing packages.
 .SS search Options
 .TP
-.B \-\-installed
+.BR \-i ", " \-\-installed
 Search only packages installed in
 .IR <root>/var/lib/pkg/db .
 .TP
-.B \-\-ports
+.BR \-p ", " \-\-ports
 Search only ports in
 .IR ports_dir .
 .TP
-.B \-\-binaries
+.BR \-b ", " \-\-binaries
 Search only packages in synced
 .IR index.json .
 .SS list Options
 .TP
-.B \-\-ports
+.BR \-p ", " \-\-ports
 List ports under
 .I ports_dir
 in
 .I <collection>/<port>
 format.
 .TP
-.B \-\-binaries
+.BR \-b ", " \-\-binaries
 List available binary packages from synced
 .IR index.json .
 .TP
-.B \-\-files \fIpackage\fR|\fIarchive\fR
+.BR \-f ", " \-\-files " \fIpackage\fR|\fIarchive\fR"
 List files belonging to an installed package or a local archive file.
 .TP
-.B \-\-owner \fIregex\fR
+.BR \-o ", " \-\-owner " \fIregex\fR"
 List installed packages owning files matching regular expression
 .IR regex .
 .TP
-.B \-\-diff
+.BR \-d ", " \-\-diff
 List version differences between installed packages and binary/port sources.
 .SS pe\-index Options
 .TP

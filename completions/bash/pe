@@ -75,7 +75,7 @@ _pe_resolve_paths() {
 			--root=*)
 				root_override="${w#--root=}"
 				;;
-			sync|update|install|build|search|list|remove|uninstall|rm|help|version)
+			sync|sy|update|up|install|in|i|build|bld|b|search|se|s|list|ls|l|remove|uninstall|rm|r|help|h|version)
 				break
 				;;
 		esac
@@ -275,7 +275,7 @@ _pe_completions() {
 	fi
 
 	local global_opts="-c --config -r --root --color --no-color -v --version -h --help"
-	local subcommands="sync update install build search list remove uninstall rm help version"
+	local subcommands="sync sy update up install in i build bld b search se s list ls l remove rm r uninstall help h version"
 
 	# Determine active subcommand (scanning past global options)
 	local cmd="" cmd_idx=0 i w
@@ -335,9 +335,9 @@ _pe_completions() {
 
 	local candidates=""
 	case "$cmd" in
-		sync)
+		sync|sy)
 			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
-				COMPREPLY=( $(compgen -W "--ports" -- "$cur") )
+				COMPREPLY=( $(compgen -W "-p --ports" -- "$cur") )
 				return
 			fi
 			candidates="$(_pe_collections_list)"
@@ -345,9 +345,9 @@ _pe_completions() {
 			return
 			;;
 
-		update)
+		update|up)
 			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
-				COMPREPLY=( $(compgen -W "-f --force --verbose --no-sync --dry-run" -- "$cur") )
+				COMPREPLY=( $(compgen -W "-f --force -v --verbose -n --no-sync -d --dry-run" -- "$cur") )
 				return
 			fi
 			candidates="$(_pe_installed_pkgs)"
@@ -355,9 +355,9 @@ _pe_completions() {
 			return
 			;;
 
-		install)
+		install|in|i)
 			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
-				COMPREPLY=( $(compgen -W "-u --upgrade -f --force --verbose --deps" -- "$cur") )
+				COMPREPLY=( $(compgen -W "-u --upgrade -R --reins --reinstall -f --force -v --verbose -d --deps" -- "$cur") )
 				return
 			fi
 			candidates="$(_pe_index_pkgs)"$'\n'"$(_pe_local_archives "$cur")"
@@ -365,9 +365,9 @@ _pe_completions() {
 			return
 			;;
 
-		build)
+		build|bld|b)
 			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
-				COMPREPLY=( $(compgen -W "-i --install -u --upgrade -f --force --deps --ignore-footprint --ignore-new --update-footprint --ignore-md5sum --ignore-signature --keep-work --no-strip --verbose" -- "$cur") )
+				COMPREPLY=( $(compgen -W "-i --install -u --upgrade -R --reins --reinstall -f --force -d --deps -S --source-deps -if --ignore-footprint -in --ignore-new -uf --update-footprint -im --ignore-md5sum -is --ignore-signature -kw --keep-work -ns --no-strip -v --verbose" -- "$cur") )
 				return
 			fi
 			candidates="$(_pe_port_names)"$'\n'"$(_pe_local_pkgfiles "$cur")"
@@ -375,17 +375,17 @@ _pe_completions() {
 			return
 			;;
 
-		search)
+		search|se|s)
 			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
-				COMPREPLY=( $(compgen -W "--installed --ports --binaries" -- "$cur") )
+				COMPREPLY=( $(compgen -W "-i --installed -p --ports -b --binaries" -- "$cur") )
 				return
 			fi
 			local s_inst=0 s_ports=0 s_bins=0
 			for (( i = cmd_idx + 1; i < cword; i++ )); do
 				case "${words[i]}" in
-					--installed) s_inst=1 ;;
-					--ports) s_ports=1 ;;
-					--binaries) s_bins=1 ;;
+					-i|--installed) s_inst=1 ;;
+					-p|--ports) s_ports=1 ;;
+					-b|--binaries) s_bins=1 ;;
 				esac
 			done
 			if (( s_inst )); then
@@ -401,26 +401,26 @@ _pe_completions() {
 			return
 			;;
 
-		list)
+		list|ls|l)
 			if (( ! after_ddash )); then
 				case "$prev" in
-					--files|-files)
+					-f|--files|-files)
 						candidates="$(_pe_installed_pkgs)"$'\n'"$(_pe_local_archives "$cur")"
 						COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
 						return
 						;;
-					--owner|-owner)
+					-o|--owner|-owner)
 						return
 						;;
 				esac
 				if [[ "$cur" == -* ]]; then
-					COMPREPLY=( $(compgen -W "--ports --binaries --files --owner --diff" -- "$cur") )
+					COMPREPLY=( $(compgen -W "-p --ports -b --binaries -f --files -o --owner -d --diff" -- "$cur") )
 					return
 				fi
 			fi
 			local has_ports_flag=0
 			for (( i = cmd_idx + 1; i < cword; i++ )); do
-				[[ "${words[i]}" == "--ports" || "${words[i]}" == "-ports" ]] && has_ports_flag=1
+				[[ "${words[i]}" == "--ports" || "${words[i]}" == "-ports" || "${words[i]}" == "-p" ]] && has_ports_flag=1
 			done
 			if (( has_ports_flag )); then
 				candidates="$(_pe_collections_list)"
@@ -429,13 +429,13 @@ _pe_completions() {
 			return
 			;;
 
-		remove|uninstall|rm)
+		remove|uninstall|rm|r)
 			candidates="$(_pe_installed_pkgs)"
 			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
 			return
 			;;
 
-		help|version)
+		help|h|version)
 			return
 			;;
 	esac

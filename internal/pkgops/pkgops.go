@@ -19,6 +19,7 @@ type InstallOptions struct {
 	Root          string
 	PkgaddConf    string
 	Upgrade       bool
+	Reinstall     bool
 	Force         bool
 	Verbose       bool
 	SkipRootCheck bool
@@ -74,10 +75,14 @@ func InstallArchive(archivePath string, opts InstallOptions) (pkgName, version s
 	}
 
 	installed := db.FindPkg(name)
-	if installed && !opts.Upgrade {
-		return "", "", fmt.Errorf("package %s already installed (use --upgrade to upgrade)", name)
+	doUpgrade := opts.Upgrade
+	if opts.Reinstall {
+		doUpgrade = installed
 	}
-	if !installed && opts.Upgrade {
+	if installed && !doUpgrade {
+		return "", "", fmt.Errorf("package %s already installed (use --upgrade or --reinstall)", name)
+	}
+	if !installed && doUpgrade {
 		return "", "", fmt.Errorf("package %s not previously installed (skip --upgrade to install)", name)
 	}
 
@@ -87,7 +92,7 @@ func InstallArchive(archivePath string, opts InstallOptions) (pkgName, version s
 	if len(conflicts) > 0 {
 		if opts.Force {
 			var forceKeep map[string]struct{}
-			if opts.Upgrade {
+			if doUpgrade {
 				forceKeep = pkgdb.MakeKeepListFromSlice(conflicts, rules)
 			}
 			db.RemoveFiles(conflicts, forceKeep, opts.ErrOut)
@@ -108,7 +113,7 @@ func InstallArchive(archivePath string, opts InstallOptions) (pkgName, version s
 	}
 
 	var keepList map[string]struct{}
-	if opts.Upgrade {
+	if doUpgrade {
 		keepList = pkgdb.MakeKeepList(info.Files, rules)
 		db.RemovePkg(name, keepList, opts.ErrOut)
 	}

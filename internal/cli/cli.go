@@ -97,21 +97,21 @@ func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) 
 
 	var runErr error
 	switch cmd {
-	case "sync":
+	case "sync", "sy":
 		runErr = cmdSync(cfg, cmdArgs, stdout, stderr, styles)
-	case "update":
+	case "update", "up":
 		runErr = cmdUpdate(cfg, cmdArgs, stdout, stderr, rt, styles)
-	case "install":
+	case "install", "in", "i":
 		runErr = cmdInstall(cfg, cmdArgs, stdout, stderr, rt, styles)
-	case "build":
+	case "build", "bld", "b":
 		runErr = cmdBuild(cfg, cmdArgs, stdout, stderr, rt, styles)
-	case "search":
+	case "search", "se", "s":
 		runErr = cmdSearch(cfg, cmdArgs, stdout, stderr, styles)
-	case "list":
+	case "list", "ls", "l":
 		runErr = cmdList(cfg, cmdArgs, stdout, stderr, styles)
-	case "remove", "uninstall", "rm":
+	case "remove", "uninstall", "rm", "r":
 		runErr = cmdRemove(cfg, cmdArgs, stdout, stderr, rt, styles)
-	case "help", "-h", "--help":
+	case "help", "h", "-h", "--help":
 		printUsage(stdout)
 		return 0
 	case "version", "-v", "--version":
@@ -209,14 +209,14 @@ Global options:
   -v, --version           print version and exit
   -h, --help              print help and exit
 
-Commands:
-  sync                    sync binary index.json from ezke5/packages rolling-x86_64 (and optional --ports)
-  update                  upgrade installed packages binary-first (reports missing binaries for pe build)
-  install                 install binary package(s) from index.json or local .pkg.tar.<ext> archive
-  build                   build package(s) from local CRUX Pkgfile ports using pe.ini settings
-  search                  short-form search across binary index, local ports, and installed packages
-  list                    list installed packages, ports (--ports), binaries (--binaries), files, or owners
-  remove, uninstall       remove installed package(s) using CRUX pkgrm policy
+Commands (with short aliases):
+  sync, sy                sync binary index.json from ezke5/packages rolling-x86_64 (and optional -p/--ports)
+  update, up              upgrade installed packages binary-first (reports missing binaries for pe build)
+  install, in, i          install binary package(s) from index.json or local .pkg.tar.<ext> archive
+  build, bld, b           build package(s) from local CRUX Pkgfile ports using pe.ini settings
+  search, se, s           short-form search across binary index, local ports, and installed packages
+  list, ls, l             list installed packages, ports (-p), binaries (-b), files (-f), owners (-o), or diff (-d)
+  remove, rm, r, uninstall  remove installed package(s) using CRUX pkgrm policy
 `)
 }
 
@@ -226,6 +226,7 @@ func cmdSync(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	syncPorts := fs.Bool("ports", false, "also sync CRUX ports collections via /etc/ports/drivers")
+	syncPortsShort := fs.Bool("p", false, "also sync CRUX ports collections via /etc/ports/drivers")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
@@ -246,7 +247,7 @@ func cmdSync(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 		styles.out.Cyan(cfg.Repo.Tag),
 	)
 
-	if *syncPorts {
+	if *syncPorts || *syncPortsShort {
 		cols := fs.Args()
 		if err := ports.SyncPorts(cfg.Paths.PortsDir, cfg.Paths.PortsConfDir, cfg.Paths.PortsDriversDir, cols, stdout, stderr); err != nil {
 			return err
@@ -262,22 +263,29 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 	fs.SetOutput(stderr)
 	upgrade := fs.Bool("upgrade", false, "upgrade an already installed package")
 	upgradeShort := fs.Bool("u", false, "upgrade an already installed package")
+	reinstall := fs.Bool("reinstall", false, "reinstall package even if already installed")
+	reinsShort := fs.Bool("reins", false, "reinstall package even if already installed")
+	reinstallFlag := fs.Bool("R", false, "reinstall package even if already installed")
 	force := fs.Bool("force", false, "overwrite conflicting files")
 	forceShort := fs.Bool("f", false, "overwrite conflicting files")
 	verbose := fs.Bool("verbose", false, "list all conflicting files without truncation")
+	verboseShort := fs.Bool("v", false, "list all conflicting files without truncation")
 	withDeps := fs.Bool("deps", false, "also install missing dependencies from binary index")
+	withDepsShort := fs.Bool("d", false, "also install missing dependencies from binary index")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 
 	targets := fs.Args()
 	if len(targets) == 0 {
-		return fmt.Errorf("usage: pe install [--upgrade] [--force] [--deps] [--verbose] <package|file...>")
+		return fmt.Errorf("usage: pe install [-u|--upgrade] [-R|--reins|--reinstall] [-f|--force] [-d|--deps] [-v|--verbose] <package|file...>")
 	}
 
 	doUpgrade := *upgrade || *upgradeShort
+	doReinstall := *reinstall || *reinsShort || *reinstallFlag
 	doForce := *force || *forceShort
-	doVerbose := *verbose
+	doVerbose := *verbose || *verboseShort
+	doDeps := *withDeps || *withDepsShort
 
 	var localFiles []string
 	var pkgNames []string
@@ -297,6 +305,7 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 			Root:          cfg.Paths.Root,
 			PkgaddConf:    cfg.Paths.PkgaddConf,
 			Upgrade:       doUpgrade,
+			Reinstall:     doReinstall,
 			Force:         doForce,
 			Verbose:       doVerbose,
 			SkipRootCheck: rt.SkipRootCheck,
@@ -322,14 +331,14 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 
 	// Read currently installed packages if resolving dependencies.
 	var installedMap map[string]pkgdb.PkgInfo
-	if *withDeps {
+	if doDeps {
 		if db, dbErr := openDBReadOnly(cfg.Paths.Root); dbErr == nil {
 			installedMap = db.Packages
 		}
 	}
 
 	installPlan := pkgNames
-	if *withDeps {
+	if doDeps {
 		installPlan = resolveBinaryDeps(cfg, idx, pkgNames, installedMap)
 	}
 
@@ -367,6 +376,7 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 			Root:          cfg.Paths.Root,
 			PkgaddConf:    cfg.Paths.PkgaddConf,
 			Upgrade:       doUpgrade,
+			Reinstall:     doReinstall,
 			Force:         doForce,
 			Verbose:       doVerbose,
 			SkipRootCheck: rt.SkipRootCheck,
@@ -390,15 +400,18 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 	force := fs.Bool("force", false, "overwrite conflicting files during upgrade")
 	forceShort := fs.Bool("f", false, "overwrite conflicting files during upgrade")
 	verbose := fs.Bool("verbose", false, "list all conflicting files without truncation")
+	verboseShort := fs.Bool("v", false, "list all conflicting files without truncation")
 	noSync := fs.Bool("no-sync", false, "use cached index.json without syncing first")
+	noSyncShort := fs.Bool("n", false, "use cached index.json without syncing first")
 	dryRun := fs.Bool("dry-run", false, "show available updates without installing")
+	dryRunShort := fs.Bool("d", false, "show available updates without installing")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 
 	var idx repo.Index
 	var err error
-	if *noSync {
+	if *noSync || *noSyncShort {
 		idx, err = loadLocalIndex(cfg)
 	} else {
 		timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
@@ -462,7 +475,7 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 		return nil
 	}
 
-	if *dryRun {
+	if *dryRun || *dryRunShort {
 		for _, e := range toUpgrade {
 			fmt.Fprintf(stdout, "%s %s -> %s\n",
 				styles.out.Bold(e.Pkgname),
@@ -474,6 +487,7 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 	}
 
 	doForce := *force || *forceShort
+	doVerbose := *verbose || *verboseShort
 	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
 	for _, entry := range toUpgrade {
 		oldVer := db.Packages[entry.Pkgname].Version
@@ -486,7 +500,7 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 			PkgaddConf:    cfg.Paths.PkgaddConf,
 			Upgrade:       true,
 			Force:         doForce,
-			Verbose:       *verbose,
+			Verbose:       doVerbose,
 			SkipRootCheck: rt.SkipRootCheck,
 			SkipLdconfig:  rt.SkipLdconfig,
 			Out:           stdout,
@@ -514,17 +528,31 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 	installShort := fs.Bool("i", false, "install built package after building")
 	upgrade := fs.Bool("upgrade", false, "upgrade installed package after building")
 	upgradeShort := fs.Bool("u", false, "upgrade installed package after building")
+	reinstall := fs.Bool("reinstall", false, "force rebuild and reinstall built package")
+	reinsShort := fs.Bool("reins", false, "force rebuild and reinstall built package")
+	reinstallFlag := fs.Bool("R", false, "force rebuild and reinstall built package")
 	force := fs.Bool("force", false, "force rebuild even if archive is up to date")
 	forceShort := fs.Bool("f", false, "force rebuild even if archive is up to date")
-	withDeps := fs.Bool("deps", false, "build recursive Pkgfile dependencies first")
+	withDeps := fs.Bool("deps", false, "resolve and install missing Pkgfile dependencies before building")
+	withDepsShort := fs.Bool("d", false, "resolve and install missing Pkgfile dependencies before building")
+	sourceDeps := fs.Bool("source-deps", false, "build missing dependencies from ports instead of using binary index")
+	sourceDepsShort := fs.Bool("S", false, "build missing dependencies from ports instead of using binary index")
 	ignoreFP := fs.Bool("ignore-footprint", false, "skip footprint verification")
+	ignoreFPShort := fs.Bool("if", false, "skip footprint verification")
 	ignoreNew := fs.Bool("ignore-new", false, "allow new files in footprint check")
+	ignoreNewShort := fs.Bool("in", false, "allow new files in footprint check")
 	updateFP := fs.Bool("update-footprint", false, "update .footprint from build output")
+	updateFPShort := fs.Bool("uf", false, "update .footprint from build output")
 	ignoreMD5 := fs.Bool("ignore-md5sum", false, "skip .md5sum verification")
+	ignoreMD5Short := fs.Bool("im", false, "skip .md5sum verification")
 	ignoreSig := fs.Bool("ignore-signature", false, "skip .signature verification")
+	ignoreSigShort := fs.Bool("is", false, "skip .signature verification")
 	keepWork := fs.Bool("keep-work", false, "keep temporary work directory")
+	keepWorkShort := fs.Bool("kw", false, "keep temporary work directory")
 	noStrip := fs.Bool("no-strip", false, "do not strip ELF binaries")
+	noStripShort := fs.Bool("ns", false, "do not strip ELF binaries")
 	verbose := fs.Bool("verbose", false, "list all conflicting files without truncation")
+	verboseShort := fs.Bool("v", false, "list all conflicting files without truncation")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
@@ -534,15 +562,25 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 		return fmt.Errorf("usage: pe build [options] <port...>")
 	}
 
+	doInstall := *install || *installShort
+	doUpgrade := *upgrade || *upgradeShort
+	doReinstall := *reinstall || *reinsShort || *reinstallFlag
+	doForce := *force || *forceShort
+	doDeps := *withDeps || *withDepsShort
+	doSourceDeps := *sourceDeps || *sourceDepsShort
+	doVerbose := *verbose || *verboseShort
+
 	// Expand targets: each target may be a single port (found recursively at any depth)
 	// or a directory/collection under ports_dir containing nested Pkgfiles.
 	var expandedTargets []string
 	var directPorts []ports.Port
+	targetNames := make(map[string]bool)
 	for _, t := range targets {
 		p, err := ports.Find(cfg.Paths.PortsDir, cfg.Paths.Collections, t)
 		if err == nil {
 			expandedTargets = append(expandedTargets, p.QualifiedName())
 			directPorts = append(directPorts, p)
+			targetNames[p.Name] = true
 			continue
 		}
 		group, gerr := ports.FindGroup(cfg.Paths.PortsDir, t)
@@ -553,6 +591,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 			for _, gp := range group {
 				expandedTargets = append(expandedTargets, gp.QualifiedName())
 				directPorts = append(directPorts, gp)
+				targetNames[gp.Name] = true
 			}
 			continue
 		}
@@ -560,7 +599,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 	}
 
 	var buildList []ports.Port
-	if *withDeps {
+	if doDeps {
 		ordered, missing, err := ports.ResolveDeps(cfg.Paths.PortsDir, cfg.Paths.Collections, expandedTargets)
 		if err != nil {
 			return err
@@ -574,39 +613,119 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 		buildList = directPorts
 	}
 
-	doInstall := *install || *installShort
-	doUpgrade := *upgrade || *upgradeShort
-	doForce := *force || *forceShort
+	// Track currently installed packages so --deps skips already-installed dependencies.
+	installedMap := make(map[string]bool)
+	if db, err := openDBReadOnly(cfg.Paths.Root); err == nil {
+		for name := range db.Packages {
+			installedMap[name] = true
+		}
+	}
+
+	// Load synced binary index (if available) for fast binary-first dependency satisfaction.
+	var binIdx repo.Index
+	hasBinIdx := false
+	if doDeps && !doSourceDeps {
+		if idx, err := repo.Load(cfg.LocalIndexPath()); err == nil {
+			binIdx = idx
+			hasBinIdx = true
+		}
+	}
+
+	buildOpts := builder.Options{
+		IgnoreFootprint: *ignoreFP || *ignoreFPShort,
+		IgnoreNew:       *ignoreNew || *ignoreNewShort,
+		UpdateFootprint: *updateFP || *updateFPShort,
+		IgnoreMD5Sum:    *ignoreMD5 || *ignoreMD5Short,
+		IgnoreSignature: *ignoreSig || *ignoreSigShort,
+		KeepWork:        *keepWork || *keepWorkShort,
+		NoStrip:         *noStrip || *noStripShort,
+		Out:             stdout,
+		ErrOut:          stderr,
+	}
+
+	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
 
 	for _, p := range buildList {
-		res, err := builder.Build(cfg, p, builder.Options{
-			Force:           doForce,
-			IgnoreFootprint: *ignoreFP,
-			IgnoreNew:       *ignoreNew,
-			UpdateFootprint: *updateFP,
-			IgnoreMD5Sum:    *ignoreMD5,
-			IgnoreSignature: *ignoreSig,
-			KeepWork:        *keepWork,
-			NoStrip:         *noStrip,
-			Out:             stdout,
-			ErrOut:          stderr,
-		})
-		if err != nil {
-			return err
-		}
-		if doInstall || doUpgrade {
-			isUpgrade := doUpgrade
-			if !isUpgrade {
-				if db, err := openDBReadOnly(cfg.Paths.Root); err == nil && db.FindPkg(p.Name) {
-					isUpgrade = true
+		isTarget := targetNames[p.Name]
+
+		// Handle dependency ports (not explicitly targeted):
+		// 1) Skip if already installed in <root>/var/lib/pkg/db.
+		// 2) Prefer prebuilt binary from synced index.json unless --source-deps is set.
+		// 3) Otherwise build from ports_dir and install into <root> so dependents can build.
+		if !isTarget {
+			if installedMap[p.Name] {
+				fmt.Fprintf(stdout, "%s dependency %s already installed, skipping\n",
+					styles.out.BoldCyan("==>"), styles.out.Bold(p.Name))
+				continue
+			}
+			if hasBinIdx {
+				if entry, ok := repo.Find(binIdx, p.Name, cfg.Repo.Arch); ok {
+					fmt.Fprintf(stdout, "%s installing binary dependency %s %s\n",
+						styles.out.BoldCyan("==>"), styles.out.Bold(entry.Pkgname), styles.out.Cyan(entry.FullVersion()))
+					localPath, err := repo.FetchBinaryWithStyle(entry, cfg.BinaryCacheDir(), timeout, stdout, styles.out)
+					if err != nil {
+						return fmt.Errorf("fetch dependency %s: %w", p.Name, err)
+					}
+					name, ver, err := pkgops.InstallArchive(localPath, pkgops.InstallOptions{
+						Root:          cfg.Paths.Root,
+						PkgaddConf:    cfg.Paths.PkgaddConf,
+						Reinstall:     true,
+						Force:         doForce,
+						Verbose:       doVerbose,
+						SkipRootCheck: rt.SkipRootCheck,
+						SkipLdconfig:  rt.SkipLdconfig,
+						Out:           stdout,
+						ErrOut:        stderr,
+					})
+					if err != nil {
+						return fmt.Errorf("install build dependency %s: %w", p.Name, err)
+					}
+					installedMap[name] = true
+					fmt.Fprintf(stdout, "%s dependency %s %s\n", styles.out.BoldGreen("installed"), styles.out.Bold(name), styles.out.Cyan(ver))
+					continue
 				}
+			}
+
+			depOpts := buildOpts
+			depOpts.Force = false
+			res, err := builder.Build(cfg, p, depOpts)
+			if err != nil {
+				return err
 			}
 			name, ver, err := pkgops.InstallArchive(res.ArchivePath, pkgops.InstallOptions{
 				Root:          cfg.Paths.Root,
 				PkgaddConf:    cfg.Paths.PkgaddConf,
-				Upgrade:       isUpgrade,
+				Reinstall:     true,
 				Force:         doForce,
-				Verbose:       *verbose,
+				Verbose:       doVerbose,
+				SkipRootCheck: rt.SkipRootCheck,
+				SkipLdconfig:  rt.SkipLdconfig,
+				Out:           stdout,
+				ErrOut:        stderr,
+			})
+			if err != nil {
+				return fmt.Errorf("install build dependency %s: %w", p.Name, err)
+			}
+			installedMap[name] = true
+			fmt.Fprintf(stdout, "%s dependency %s %s\n", styles.out.BoldGreen("installed"), styles.out.Bold(name), styles.out.Cyan(ver))
+			continue
+		}
+
+		// Explicitly requested target port: always built from source.
+		targetOpts := buildOpts
+		targetOpts.Force = doForce || doReinstall
+		res, err := builder.Build(cfg, p, targetOpts)
+		if err != nil {
+			return err
+		}
+		if doInstall || doUpgrade || doReinstall {
+			name, ver, err := pkgops.InstallArchive(res.ArchivePath, pkgops.InstallOptions{
+				Root:          cfg.Paths.Root,
+				PkgaddConf:    cfg.Paths.PkgaddConf,
+				Upgrade:       doUpgrade && !doReinstall && !doInstall,
+				Reinstall:     doReinstall || doInstall,
+				Force:         doForce,
+				Verbose:       doVerbose,
 				SkipRootCheck: rt.SkipRootCheck,
 				SkipLdconfig:  rt.SkipLdconfig,
 				Out:           stdout,
@@ -615,6 +734,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 			if err != nil {
 				return err
 			}
+			installedMap[name] = true
 			fmt.Fprintf(stdout, "%s %s %s\n", styles.out.BoldGreen("installed"), styles.out.Bold(name), styles.out.Cyan(ver))
 		}
 	}
@@ -636,17 +756,24 @@ func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer, style
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	onlyInstalled := fs.Bool("installed", false, "search only installed packages")
+	onlyInstalledShort := fs.Bool("i", false, "search only installed packages")
 	onlyPorts := fs.Bool("ports", false, "search only local ports tree")
+	onlyPortsShort := fs.Bool("p", false, "search only local ports tree")
 	onlyBinaries := fs.Bool("binaries", false, "search only binary repository index")
+	onlyBinariesShort := fs.Bool("b", false, "search only binary repository index")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return fmt.Errorf("usage: pe search [--installed|--ports|--binaries] <query>")
+		return fmt.Errorf("usage: pe search [-i|--installed|-p|--ports|-b|--binaries] <query>")
 	}
 	query := strings.ToLower(strings.Join(fs.Args(), " "))
 
-	includeAll := !*onlyInstalled && !*onlyPorts && !*onlyBinaries
+	fInstalled := *onlyInstalled || *onlyInstalledShort
+	fPorts := *onlyPorts || *onlyPortsShort
+	fBinaries := *onlyBinaries || *onlyBinariesShort
+
+	includeAll := !fInstalled && !fPorts && !fBinaries
 	records := make(map[string]*searchRecord)
 	getRec := func(name string) *searchRecord {
 		r, ok := records[name]
@@ -658,7 +785,7 @@ func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer, style
 	}
 
 	// 1. Binary index
-	if includeAll || *onlyBinaries {
+	if includeAll || fBinaries {
 		idxPath := cfg.LocalIndexPath()
 		idx, err := repo.Load(idxPath)
 		if err == nil {
@@ -681,13 +808,13 @@ func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer, style
 				styles.err.BoldYellow("pe: warning:"), idxPath)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(stderr, "%s cannot load %s: %v\n", styles.err.BoldYellow("pe: warning:"), idxPath, err)
-		} else if *onlyBinaries {
+		} else if fBinaries {
 			return fmt.Errorf("local index %s not found; run `pe sync` first", idxPath)
 		}
 	}
 
 	// 2. Local ports tree
-	if includeAll || *onlyPorts {
+	if includeAll || fPorts {
 		if allPorts, err := ports.DiscoverAll(cfg.Paths.PortsDir, cfg.Paths.Collections); err == nil {
 			for _, p := range allPorts {
 				r := getRec(p.Name)
@@ -699,13 +826,13 @@ func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer, style
 					r.description = p.Description
 				}
 			}
-		} else if *onlyPorts {
+		} else if fPorts {
 			return err
 		}
 	}
 
 	// 3. Installed DB
-	if includeAll || *onlyInstalled {
+	if includeAll || fInstalled {
 		if db, err := openDBReadOnly(cfg.Paths.Root); err == nil {
 			for _, name := range db.SortedNames() {
 				r := getRec(name)
@@ -714,20 +841,20 @@ func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer, style
 					r.version = db.Packages[name].Version
 				}
 			}
-		} else if *onlyInstalled {
+		} else if fInstalled {
 			return err
 		}
 	}
 
 	names := make([]string, 0, len(records))
 	for name, r := range records {
-		if *onlyInstalled && !r.installed {
+		if fInstalled && !r.installed {
 			continue
 		}
-		if *onlyPorts && !r.port {
+		if fPorts && !r.port {
 			continue
 		}
-		if *onlyBinaries && !r.binary {
+		if fBinaries && !r.binary {
 			continue
 		}
 		if strings.Contains(strings.ToLower(name), query) || strings.Contains(strings.ToLower(r.description), query) {
@@ -778,28 +905,45 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	listPorts := fs.Bool("ports", false, "list available ports in the local ports tree (CRUX ports -l)")
+	listPortsShort := fs.Bool("p", false, "list available ports in the local ports tree (CRUX ports -l)")
 	listBinaries := fs.Bool("binaries", false, "list available binary packages from synced index.json")
+	listBinariesShort := fs.Bool("b", false, "list available binary packages from synced index.json")
 	listFiles := fs.String("files", "", "list files owned by installed <package> or local <archive>")
+	listFilesShort := fs.String("f", "", "list files owned by installed <package> or local <archive>")
 	ownerPattern := fs.String("owner", "", "list package(s) owning files matching <regex>")
+	ownerPatternShort := fs.String("o", "", "list package(s) owning files matching <regex>")
 	listDiff := fs.Bool("diff", false, "list version differences between installed packages and binaries/ports")
+	listDiffShort := fs.Bool("d", false, "list version differences between installed packages and binaries/ports")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 
+	doPorts := *listPorts || *listPortsShort
+	doBinaries := *listBinaries || *listBinariesShort
+	filesTarget := *listFiles
+	if filesTarget == "" {
+		filesTarget = *listFilesShort
+	}
+	ownerTarget := *ownerPattern
+	if ownerTarget == "" {
+		ownerTarget = *ownerPatternShort
+	}
+	doDiff := *listDiff || *listDiffShort
+
 	modeCount := 0
-	if *listPorts {
+	if doPorts {
 		modeCount++
 	}
-	if *listBinaries {
+	if doBinaries {
 		modeCount++
 	}
-	if *listFiles != "" {
+	if filesTarget != "" {
 		modeCount++
 	}
-	if *ownerPattern != "" {
+	if ownerTarget != "" {
 		modeCount++
 	}
-	if *listDiff {
+	if doDiff {
 		modeCount++
 	}
 	if modeCount > 1 {
@@ -807,7 +951,7 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 	}
 
 	switch {
-	case *listPorts:
+	case doPorts:
 		cols := cfg.Paths.Collections
 		if fs.NArg() > 0 {
 			cols = fs.Args()
@@ -825,7 +969,7 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 		}
 		return nil
 
-	case *listBinaries:
+	case doBinaries:
 		idx, err := loadLocalIndex(cfg)
 		if err != nil {
 			return err
@@ -837,8 +981,8 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 		}
 		return nil
 
-	case *listFiles != "":
-		target := *listFiles
+	case filesTarget != "":
+		target := filesTarget
 		if db, err := openDBReadOnly(cfg.Paths.Root); err == nil && db.FindPkg(target) {
 			for _, f := range db.Packages[target].SortedFiles() {
 				fmt.Fprintln(stdout, f)
@@ -857,10 +1001,10 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 		}
 		return fmt.Errorf("%s is neither an installed package nor a package file", target)
 
-	case *ownerPattern != "":
-		re, err := regexp.Compile(*ownerPattern)
+	case ownerTarget != "":
+		re, err := regexp.Compile(ownerTarget)
 		if err != nil {
-			return fmt.Errorf("error compiling regular expression %q: %w", *ownerPattern, err)
+			return fmt.Errorf("error compiling regular expression %q: %w", ownerTarget, err)
 		}
 		db, err := openDBReadOnly(cfg.Paths.Root)
 		if err != nil {
@@ -886,7 +1030,7 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 		}
 		return tw.Flush()
 
-	case *listDiff:
+	case doDiff:
 		db, err := openDBReadOnly(cfg.Paths.Root)
 		if err != nil {
 			return err
