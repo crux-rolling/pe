@@ -13,10 +13,10 @@ import (
 
 const (
 	DefaultConfigPath = "/etc/pe.ini"
-	DefaultRepo       = "ezke5/packages"
+	DefaultRepo       = "kryx-linux/packages"
 	DefaultTag        = "rolling-x86_64"
 	DefaultArch       = "x86_64"
-	DefaultIndexURL   = "https://github.com/ezke5/packages/releases/download/rolling-x86_64/index.json"
+	DefaultIndexURL   = "https://github.com/kryx-linux/packages/releases/download/rolling-x86_64/index.json"
 )
 
 // Config holds all runtime settings loaded from pe.ini.
