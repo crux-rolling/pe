@@ -21,7 +21,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ezke5/pe/internal/pkgdb"
+	"github.com/kryx-linux/pe/internal/pkgdb"
 )
 
 const (
