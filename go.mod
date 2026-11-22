@@ -1,3 +1,3 @@
-module github.com/ezke5/pe
+module github.com/kryx-linux/pe
 
 go 1.24
