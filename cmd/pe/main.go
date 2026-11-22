@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/ezke5/pe/internal/cli"
+	"github.com/kryx-linux/pe/internal/cli"
 )
 
 func main() {
