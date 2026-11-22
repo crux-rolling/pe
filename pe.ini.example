@@ -36,10 +36,10 @@ ports_drivers_dir = /etc/ports/drivers
 
 [repo]
 # Binary repository release index (ezke5/packages rolling-x86_64)
-repository = ezke5/packages
+repository = kryx-linux/packages
 tag = rolling-x86_64
 arch = x86_64
-index_url = https://github.com/ezke5/packages/releases/download/rolling-x86_64/index.json
+index_url = https://github.com/kryx-linux/packages/releases/download/rolling-x86_64/index.json
 
 # HTTP timeout in seconds for syncing index.json and downloading binaries
 timeout_seconds = 120
