@@ -15,14 +15,14 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/ezke5/pe/internal/archive"
-	"github.com/ezke5/pe/internal/builder"
-	"github.com/ezke5/pe/internal/config"
-	"github.com/ezke5/pe/internal/pkgdb"
-	"github.com/ezke5/pe/internal/pkgops"
-	"github.com/ezke5/pe/internal/ports"
-	"github.com/ezke5/pe/internal/repo"
-	"github.com/ezke5/pe/internal/ui"
+	"github.com/kryx-linux/pe/internal/archive"
+	"github.com/kryx-linux/pe/internal/builder"
+	"github.com/kryx-linux/pe/internal/config"
+	"github.com/kryx-linux/pe/internal/pkgdb"
+	"github.com/kryx-linux/pe/internal/pkgops"
+	"github.com/kryx-linux/pe/internal/ports"
+	"github.com/kryx-linux/pe/internal/repo"
+	"github.com/kryx-linux/pe/internal/ui"
 )
 
 // Version is injected at link time via -ldflags.
