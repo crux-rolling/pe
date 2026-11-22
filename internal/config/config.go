@@ -13,10 +13,10 @@ import (
 
 const (
 	DefaultConfigPath = "/etc/pe.ini"
-	DefaultRepo       = "kryx-linux/packages"
+	DefaultRepo       = "kryx-linux/ports"
 	DefaultTag        = "rolling-x86_64"
 	DefaultArch       = "x86_64"
-	DefaultIndexURL   = "https://github.com/kryx-linux/packages/releases/download/rolling-x86_64/index.json"
+	DefaultIndexURL   = "https://github.com/kryx-linux/ports/releases/download/rolling-x86_64/index.json"
 )
 
 // Config holds all runtime settings loaded from pe.ini.

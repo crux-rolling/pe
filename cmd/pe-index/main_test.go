@@ -40,7 +40,7 @@ build() { true; }
 	}
 
 	idxPath := filepath.Join(dir, "index.json")
-	baseURL := "https://github.com/kryx-linux/packages/releases/download/rolling-x86_64"
+	baseURL := "https://github.com/kryx-linux/ports/releases/download/rolling-x86_64"
 	var stderr bytes.Buffer
 	if err := runIndex(idxPath, pkgDir, portsDir, baseURL, "x86_64", false, &stderr); err != nil {
 		t.Fatalf("runIndex failed: %v (%s)", err, stderr.String())

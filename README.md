@@ -6,7 +6,7 @@
 
 - **CRUX-native database compatibility**: Reads and atomically writes `/var/lib/pkg/db` with `flock` on `/var/lib/pkg`, `.incomplete_transaction` + `.backup` commits, `/etc/pkgadd.conf` (`INSTALL`/`UPGRADE`) rules, `/var/lib/pkg/rejected/` handling, conflict detection, shared-file-safe removal, and `/sbin/ldconfig`.
 - **Standard CRUX archive naming**: Supports `<name>#<version>-<release>.pkg.tar.<ext>` across `zst` (default), `xz`, `gz`, `bz2`, and `lz`.
-- **Strictly binary-first installs**: `pe install` consumes `index.json` from `kryx-linux/packages` release tag `rolling-x86_64`. When no binary exists, `pe` never auto-builds; it reports the missing binary and directs you to run `pe build <pkg>`.
+- **Strictly binary-first installs**: `pe install` consumes `index.json` from `kryx-linux/ports` release tag `rolling-x86_64`. When no binary exists, `pe` never auto-builds; it reports the missing binary and directs you to run `pe build <pkg>`.
 - **Ports stay in place**: Uses your existing CRUX ports tree (`/usr/ports` by default) without relocating ports.
 - **Manual INI configuration**: Build flags (`jobs`, `cflags`, `cxxflags`, `makeflags`, `compression`), source cache, work/package directories, and repo URLs are configured in `/etc/pe.ini`.
 
@@ -60,4 +60,4 @@ See [pe.ini.example](pe.ini.example) for all supported `[paths]`, `[repo]`, and 
 
 ## Repository Indexing & GitHub Actions
 
-Binary repository releases and `index.json` updates for `kryx-linux/packages` (`rolling-x86_64`) are automated via `.github/workflows/release-index.yml` using `pe-index`.
+Binary repository releases and `index.json` updates for `kryx-linux/ports` (`rolling-x86_64`) are automated via `.github/workflows/release-index.yml` using `pe-index`.

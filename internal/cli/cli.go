@@ -210,7 +210,7 @@ Global options:
   -h, --help              print help and exit
 
 Commands (with short aliases):
-  sync, sy                sync binary index.json from kryx-linux/packages rolling-x86_64 (and optional -p/--ports)
+  sync, sy                sync binary index.json from kryx-linux/ports rolling-x86_64 (and optional -p/--ports)
   update, up              upgrade installed packages binary-first (reports missing binaries for pe build)
   install, in, i          install binary package(s) from index.json or local .pkg.tar.<ext> archive
   build, bld, b           build package(s) from local CRUX Pkgfile ports using pe.ini settings

@@ -1,5 +1,5 @@
 // Command pe-index generates or updates index.json from CRUX .pkg.tar.<ext> archives
-// for kryx-linux/packages rolling-x86_64 releases.
+// for kryx-linux/ports rolling-x86_64 releases.
 package main
 
 import (
@@ -23,7 +23,7 @@ func main() {
 	indexPath := fs.String("index", "index.json", "JSON index to create or update")
 	packagesDir := fs.String("packages", ".", "directory containing CRUX .pkg.tar.<ext> archives")
 	portsDir := fs.String("ports", "", "optional CRUX ports directory to enrich descriptions and dependencies")
-	baseURL := fs.String("base-url", "", "base URL for package downloads (e.g. https://github.com/kryx-linux/packages/releases/download/rolling-x86_64)")
+	baseURL := fs.String("base-url", "", "base URL for package downloads (e.g. https://github.com/kryx-linux/ports/releases/download/rolling-x86_64)")
 	arch := fs.String("arch", defaultArch(), "package architecture")
 	prune := fs.Bool("prune", false, "remove index entries whose archives are no longer present in --packages")
 
