@@ -13,6 +13,7 @@ import (
 	"github.com/kryx-linux/pe/internal/config"
 	"github.com/kryx-linux/pe/internal/pkgdb"
 	"github.com/kryx-linux/pe/internal/pkgops"
+	"github.com/kryx-linux/pe/internal/ports"
 	"github.com/kryx-linux/pe/internal/repo"
 	"github.com/kryx-linux/pe/internal/ui"
 )
@@ -97,36 +98,6 @@ func Build(opts BuildOptions) (BuildResult, error) {
 		return BuildResult{}, err
 	}
 
-	ordered, missing, err := reg.ResolveDepsOrder(roots, opts.WithDeps)
-	if err != nil {
-		return BuildResult{}, err
-	}
-	if len(missing) > 0 {
-		fmt.Fprintf(opts.ErrOut, "%s dependencies not found in ports tree: %s\n",
-			stErr.BoldYellow("kryx-src: warning:"), strings.Join(missing, ", "))
-	}
-
-	targetDirs := make(map[string]bool, len(roots))
-	for _, r := range roots {
-		targetDirs[r.Port.Dir] = true
-	}
-
-	// Print execution plan
-	var planNames []string
-	for _, e := range ordered {
-		tag := "dep"
-		if targetDirs[e.Port.Dir] {
-			tag = "target"
-		}
-		planNames = append(planNames, fmt.Sprintf("%s (%s, %s)", e.Port.Name, e.RelDir, tag))
-	}
-	fmt.Fprintf(opts.Out, "%s build plan (%d): %s\n",
-		stOut.BoldCyan("==>"), len(ordered), strings.Join(planNames, ", "))
-
-	if opts.DryRun {
-		return BuildResult{BuiltPorts: ordered, MissingDeps: missing}, nil
-	}
-
 	// Read currently installed packages under Root to skip already-installed build deps.
 	installedMap := make(map[string]bool)
 	if lock, lerr := pkgdb.AcquireLock(cfg.Paths.Root, false); lerr == nil {
@@ -138,23 +109,122 @@ func Build(opts BuildOptions) (BuildResult, error) {
 		_ = lock.Release()
 	}
 
-	// Load or sync remote binary index for binary-first dependency satisfaction.
+	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
+
+	// Load or sync remote binary index for binary-first dependency satisfaction (runtime + make deps).
 	var binIdx repo.Index
 	hasBinIdx := false
 	if opts.WithDeps && !opts.SourceDeps {
-		timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
 		if opts.SyncBinaryIndex && cfg.Repo.IndexURL != "" {
 			if idx, serr := repo.SyncWithLog(cfg.Repo.IndexURL, cfg.LocalIndexPath(), timeout, opts.Out, stOut); serr == nil {
 				binIdx = idx
 				hasBinIdx = true
 			} else {
-				fmt.Fprintf(opts.ErrOut, "%s could not sync remote index.json (%v); falling back to source deps\n",
+				fmt.Fprintf(opts.ErrOut, "%s could not sync remote index.json (%v); falling back to cached/source deps\n",
 					stErr.BoldYellow("kryx-src: warning:"), serr)
 			}
-		} else if idx, lerr := repo.Load(cfg.LocalIndexPath()); lerr == nil {
-			binIdx = idx
-			hasBinIdx = true
 		}
+		if !hasBinIdx {
+			if idx, lerr := repo.Load(cfg.LocalIndexPath()); lerr == nil {
+				binIdx = idx
+				hasBinIdx = true
+			}
+		}
+	}
+
+	// Fully evaluate root Pkgfiles so version/source/renames are exact.
+	rootPorts := make([]ports.Port, 0, len(roots))
+	relByDir := make(map[string]string, len(roots))
+	for _, r := range roots {
+		full, perr := ports.ParsePkgfile(r.Port.Dir, reg.PortsDir)
+		if perr != nil {
+			return BuildResult{}, perr
+		}
+		full.RelDir = r.RelDir
+		if reg.IsSinglePort {
+			full.Collection = ""
+		}
+		rootPorts = append(rootPorts, full)
+		relByDir[full.Dir] = r.RelDir
+	}
+
+	var plan []ports.BuildStep
+	var missing []string
+	if opts.WithDeps {
+		var binLookup ports.BinaryDepLookup
+		if hasBinIdx {
+			binLookup = func(name string) ([]string, bool) {
+				if e, ok := repo.Find(binIdx, name, cfg.Repo.Arch); ok {
+					return e.Depends, true
+				}
+				return nil, false
+			}
+		}
+		findPort := func(name string) (ports.Port, error) {
+			e, ok := reg.Resolve(name)
+			if !ok {
+				return ports.Port{}, fmt.Errorf("port %q not found", name)
+			}
+			full, perr := ports.ParsePkgfile(e.Port.Dir, reg.PortsDir)
+			if perr != nil {
+				return ports.Port{}, perr
+			}
+			full.RelDir = e.RelDir
+			if reg.IsSinglePort {
+				full.Collection = ""
+			}
+			relByDir[full.Dir] = e.RelDir
+			return full, nil
+		}
+		plan, missing, err = ports.ResolveBuildPlan(rootPorts, findPort, installedMap, binLookup)
+		if err != nil {
+			return BuildResult{}, err
+		}
+		if len(missing) > 0 {
+			fmt.Fprintf(opts.ErrOut, "%s dependencies not found in binary index or ports tree: %s\n",
+				stErr.BoldYellow("kryx-src: warning:"), strings.Join(missing, ", "))
+		}
+	} else {
+		for _, p := range rootPorts {
+			pc := p
+			plan = append(plan, ports.BuildStep{
+				Name:     p.Name,
+				Port:     &pc,
+				IsTarget: true,
+			})
+		}
+	}
+
+	// Print execution plan
+	var planNames []string
+	var plannedEntries []Entry
+	for _, step := range plan {
+		kind := "src-dep"
+		if step.IsTarget {
+			kind = "target"
+		} else if step.AlreadyInstalled {
+			kind = "installed"
+		} else if step.FromBinary {
+			kind = "bin-dep"
+		}
+		rel := step.Name
+		if step.Port != nil && step.Port.RelDir != "" {
+			rel = step.Port.RelDir
+		}
+		planNames = append(planNames, fmt.Sprintf("%s (%s, %s)", step.Name, rel, kind))
+		if step.Port != nil {
+			plannedEntries = append(plannedEntries, Entry{
+				Port:   *step.Port,
+				RelDir: step.Port.RelDir,
+				Base:   filepath.Base(step.Port.Dir),
+			})
+		}
+	}
+	fmt.Fprintf(opts.Out, "%s build plan (%d): %s\n",
+		stOut.BoldCyan("==>"), len(plan), strings.Join(planNames, ", "))
+
+	if opts.DryRun {
+		return BuildResult{BuiltPorts: plannedEntries, MissingDeps: missing}, nil
 	}
 
 	buildOpts := builder.Options{
@@ -171,26 +241,22 @@ func Build(opts BuildOptions) (BuildResult, error) {
 
 	var result BuildResult
 	result.MissingDeps = missing
-	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
 
-	for _, entry := range ordered {
-		p := entry.Port
-		isTarget := targetDirs[p.Dir]
-
-		if !isTarget {
-			if installedMap[p.Name] {
+	for _, step := range plan {
+		if !step.IsTarget {
+			if step.AlreadyInstalled || installedMap[step.Name] {
 				fmt.Fprintf(opts.Out, "%s dependency %s already installed, skipping\n",
-					stOut.BoldCyan("==>"), stOut.Bold(p.Name))
+					stOut.BoldCyan("==>"), stOut.Bold(step.Name))
 				continue
 			}
 
-			if hasBinIdx {
-				if binEntry, ok := repo.Find(binIdx, p.Name, cfg.Repo.Arch); ok {
+			if step.FromBinary && hasBinIdx {
+				if binEntry, ok := repo.Find(binIdx, step.Name, cfg.Repo.Arch); ok {
 					fmt.Fprintf(opts.Out, "%s installing binary dependency %s %s\n",
 						stOut.BoldCyan("==>"), stOut.Bold(binEntry.Pkgname), stOut.Cyan(binEntry.FullVersion()))
 					localPath, ferr := repo.FetchBinaryWithStyle(binEntry, cfg.BinaryCacheDir(), timeout, opts.Out, stOut)
 					if ferr != nil {
-						return result, fmt.Errorf("fetch dependency %s: %w", p.Name, ferr)
+						return result, fmt.Errorf("fetch dependency %s: %w", step.Name, ferr)
 					}
 					name, ver, ierr := pkgops.InstallArchive(localPath, pkgops.InstallOptions{
 						Root:          cfg.Paths.Root,
@@ -203,7 +269,7 @@ func Build(opts BuildOptions) (BuildResult, error) {
 						ErrOut:        opts.ErrOut,
 					})
 					if ierr != nil {
-						return result, fmt.Errorf("install binary dependency %s: %w", p.Name, ierr)
+						return result, fmt.Errorf("install binary dependency %s: %w", step.Name, ierr)
 					}
 					installedMap[name] = true
 					fmt.Fprintf(opts.Out, "%s dependency %s %s\n", stOut.BoldGreen("installed"), stOut.Bold(name), stOut.Cyan(ver))
@@ -211,6 +277,11 @@ func Build(opts BuildOptions) (BuildResult, error) {
 				}
 			}
 
+			if step.Port == nil {
+				return result, fmt.Errorf("dependency %s has no local Pkgfile or binary entry", step.Name)
+			}
+			p := *step.Port
+			entry := Entry{Port: p, RelDir: p.RelDir, Base: filepath.Base(p.Dir)}
 			depOpts := buildOpts
 			depOpts.Force = false
 			res, berr := builder.Build(cfg, p, depOpts)
@@ -239,6 +310,8 @@ func Build(opts BuildOptions) (BuildResult, error) {
 		}
 
 		// Explicitly requested target port: always built from source.
+		p := *step.Port
+		entry := Entry{Port: p, RelDir: p.RelDir, Base: filepath.Base(p.Dir)}
 		targetOpts := buildOpts
 		targetOpts.Force = opts.Force
 		res, berr := builder.Build(cfg, p, targetOpts)

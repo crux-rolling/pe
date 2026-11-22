@@ -28,8 +28,32 @@ type Port struct {
 	Maintainer  string
 	Packager    string
 	Depends     []string
+	MakeDepends []string
 	Source      []string
 	Renames     []string
+}
+
+// AllBuildDepends returns deduplicated runtime Depends followed by build-only
+// MakeDepends in declaration order. Ports without MakeDepends return Depends unchanged.
+func (p Port) AllBuildDepends() []string {
+	if len(p.MakeDepends) == 0 {
+		return p.Depends
+	}
+	out := make([]string, 0, len(p.Depends)+len(p.MakeDepends))
+	seen := make(map[string]bool, len(p.Depends)+len(p.MakeDepends))
+	for _, d := range p.Depends {
+		if !seen[d] {
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	for _, d := range p.MakeDepends {
+		if !seen[d] {
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // FullVersion returns "<version>-<release>" (or "<version>" if release is empty).
@@ -450,7 +474,7 @@ func ResolveDepsForPorts(portsDir string, collections []string, roots []Port) (o
 			return nil
 		}
 		visiting[key] = true
-		for _, dep := range p.Depends {
+		for _, dep := range p.AllBuildDepends() {
 			if err := dfsName(dep); err != nil {
 				return err
 			}
@@ -485,6 +509,156 @@ func ResolveDepsForPorts(portsDir string, collections []string, roots []Port) (o
 	}
 	sort.Strings(missing)
 	return ordered, missing, nil
+}
+
+// BinaryDepLookup reports whether a prebuilt binary is available for pkgName
+// and returns its runtime dependencies (if recorded in the binary index).
+type BinaryDepLookup func(pkgName string) (runtimeDeps []string, ok bool)
+
+// PortLookup resolves a package/port name from a local ports tree.
+type PortLookup func(name string) (Port, error)
+
+// BuildStep is one ordered step in a binary-aware dependency build plan.
+type BuildStep struct {
+	Name             string
+	Port             *Port // Non-nil for local source builds (and optional metadata for binary steps)
+	IsTarget         bool  // Explicitly requested root target (always compiled from source)
+	FromBinary       bool  // Install prebuilt binary from index.json instead of compiling from source
+	AlreadyInstalled bool  // Dependency is already present in <root>/var/lib/pkg/db (skipped without expanding its deps)
+}
+
+// ResolveBuildPlan computes a topological (dependencies-first) build plan for roots:
+//   - Explicitly requested root targets always build from source and require both
+//     Depends and MakeDepends.
+//   - Already-installed dependencies are skipped without expanding their deps.
+//   - When lookupBinary is non-nil and finds a prebuilt binary for an uninstalled
+//     dependency, that dependency is scheduled as FromBinary and only its runtime
+//     Depends are expanded (its MakeDepends are NOT needed). This also succeeds for
+//     binary-only dependencies absent from the local ports tree.
+//   - Dependencies that must be compiled from source expand both Depends and MakeDepends.
+func ResolveBuildPlan(roots []Port, findPort PortLookup, installed map[string]bool, lookupBinary BinaryDepLookup) (plan []BuildStep, missing []string, err error) {
+	rootByName := make(map[string]Port, len(roots))
+	for _, r := range roots {
+		if r.Name != "" {
+			rootByName[r.Name] = r
+		}
+	}
+
+	visited := make(map[string]bool)
+	visiting := make(map[string]bool)
+	missingSet := make(map[string]bool)
+
+	var visitSource func(p Port, isTarget bool) error
+	var visitDep func(name string) error
+
+	visitSource = func(p Port, isTarget bool) error {
+		key := p.Name
+		if key == "" {
+			key = p.Dir
+		}
+		if visited[key] || visiting[key] {
+			return nil
+		}
+		visiting[key] = true
+		for _, dep := range p.AllBuildDepends() {
+			if err := visitDep(dep); err != nil {
+				return err
+			}
+		}
+		delete(visiting, key)
+		if !visited[key] {
+			visited[key] = true
+			pc := p
+			plan = append(plan, BuildStep{
+				Name:       p.Name,
+				Port:       &pc,
+				IsTarget:   isTarget,
+				FromBinary: false,
+			})
+		}
+		return nil
+	}
+
+	visitDep = func(name string) error {
+		if name == "" || visited[name] || visiting[name] {
+			return nil
+		}
+		// If a dependency is itself one of the requested root targets, build it first.
+		if rootPort, isRoot := rootByName[name]; isRoot {
+			return visitSource(rootPort, true)
+		}
+		if installed[name] {
+			visited[name] = true
+			plan = append(plan, BuildStep{
+				Name:             name,
+				AlreadyInstalled: true,
+			})
+			return nil
+		}
+		visiting[name] = true
+
+		// Binary-first dependency resolution: only runtime Depends are required.
+		if lookupBinary != nil {
+			if binDeps, ok := lookupBinary(name); ok {
+				deps := binDeps
+				var localPort *Port
+				if findPort != nil {
+					if p, perr := findPort(name); perr == nil {
+						pc := p
+						localPort = &pc
+						if len(deps) == 0 {
+							deps = p.Depends
+						}
+					}
+				}
+				for _, d := range deps {
+					if err := visitDep(d); err != nil {
+						return err
+					}
+				}
+				delete(visiting, name)
+				if !visited[name] {
+					visited[name] = true
+					plan = append(plan, BuildStep{
+						Name:       name,
+						Port:       localPort,
+						IsTarget:   false,
+						FromBinary: true,
+					})
+				}
+				return nil
+			}
+		}
+
+		// No binary available (or --source-deps): resolve from local ports tree and build from source.
+		if findPort == nil {
+			delete(visiting, name)
+			if !missingSet[name] {
+				missingSet[name] = true
+				missing = append(missing, name)
+			}
+			return nil
+		}
+		p, findErr := findPort(name)
+		if findErr != nil {
+			delete(visiting, name)
+			if !missingSet[name] {
+				missingSet[name] = true
+				missing = append(missing, name)
+			}
+			return nil
+		}
+		delete(visiting, name)
+		return visitSource(p, false)
+	}
+
+	for _, r := range roots {
+		if err := visitSource(r, true); err != nil {
+			return nil, nil, err
+		}
+	}
+	sort.Strings(missing)
+	return plan, missing, nil
 }
 
 // SyncPorts runs CRUX port collection drivers under driversDir matching config files
@@ -604,13 +778,29 @@ func parseHeaders(pkgfile string) (Port, error) {
 		case "packager":
 			p.Packager = val
 		case "depends on", "depends":
-			p.Depends = parseDepends(val)
+			p.Depends = appendUnique(p.Depends, parseDepends(val)...)
+		case "make depends on", "make depends", "makedepends", "build depends on", "build depends":
+			p.MakeDepends = appendUnique(p.MakeDepends, parseDepends(val)...)
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return Port{}, err
 	}
 	return p, nil
+}
+
+func appendUnique(dst []string, items ...string) []string {
+	seen := make(map[string]bool, len(dst)+len(items))
+	for _, s := range dst {
+		seen[s] = true
+	}
+	for _, item := range items {
+		if item != "" && !seen[item] {
+			seen[item] = true
+			dst = append(dst, item)
+		}
+	}
+	return dst
 }
 
 func parseDepends(raw string) []string {

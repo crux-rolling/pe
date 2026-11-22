@@ -533,8 +533,9 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 	reinstallFlag := fs.Bool("R", false, "force rebuild and reinstall built package")
 	force := fs.Bool("force", false, "force rebuild even if archive is up to date")
 	forceShort := fs.Bool("f", false, "force rebuild even if archive is up to date")
-	withDeps := fs.Bool("deps", false, "resolve and install missing Pkgfile dependencies before building")
-	withDepsShort := fs.Bool("d", false, "resolve and install missing Pkgfile dependencies before building")
+	withDeps := fs.Bool("deps", false, "resolve and install missing Pkgfile dependencies (runtime and make) before building")
+	withDepsShort := fs.Bool("d", false, "resolve and install missing Pkgfile dependencies (runtime and make) before building")
+	syncIndex := fs.Bool("sync", false, "sync remote binary index.json before resolving binary dependencies")
 	sourceDeps := fs.Bool("source-deps", false, "build missing dependencies from ports instead of using binary index")
 	sourceDepsShort := fs.Bool("S", false, "build missing dependencies from ports instead of using binary index")
 	ignoreFP := fs.Bool("ignore-footprint", false, "skip footprint verification")
@@ -567,20 +568,17 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 	doReinstall := *reinstall || *reinsShort || *reinstallFlag
 	doForce := *force || *forceShort
 	doDeps := *withDeps || *withDepsShort
+	doSync := *syncIndex
 	doSourceDeps := *sourceDeps || *sourceDepsShort
 	doVerbose := *verbose || *verboseShort
 
 	// Expand targets: each target may be a single port (found recursively at any depth)
 	// or a directory/collection under ports_dir containing nested Pkgfiles.
 	var directPorts []ports.Port
-	targetNames := make(map[string]bool)
-	targetDirs := make(map[string]bool)
 	for _, t := range targets {
 		p, err := ports.Find(cfg.Paths.PortsDir, cfg.Paths.Collections, t)
 		if err == nil {
 			directPorts = append(directPorts, p)
-			targetNames[p.Name] = true
-			targetDirs[p.Dir] = true
 			continue
 		}
 		group, gerr := ports.FindGroup(cfg.Paths.PortsDir, t)
@@ -588,29 +586,10 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 			return gerr
 		}
 		if len(group) > 0 {
-			for _, gp := range group {
-				directPorts = append(directPorts, gp)
-				targetNames[gp.Name] = true
-				targetDirs[gp.Dir] = true
-			}
+			directPorts = append(directPorts, group...)
 			continue
 		}
 		return err
-	}
-
-	var buildList []ports.Port
-	if doDeps {
-		ordered, missing, err := ports.ResolveDepsForPorts(cfg.Paths.PortsDir, cfg.Paths.Collections, directPorts)
-		if err != nil {
-			return err
-		}
-		if len(missing) > 0 {
-			fmt.Fprintf(stderr, "%s dependencies not found in ports tree: %s\n",
-				styles.err.BoldYellow("pe: warning:"), strings.Join(missing, ", "))
-		}
-		buildList = ordered
-	} else {
-		buildList = directPorts
 	}
 
 	// Track currently installed packages so --deps skips already-installed dependencies.
@@ -621,13 +600,60 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 		}
 	}
 
-	// Load synced binary index (if available) for fast binary-first dependency satisfaction.
+	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
+
+	// Load (or sync with --sync) binary index for fast binary-first runtime/make dependency satisfaction.
 	var binIdx repo.Index
 	hasBinIdx := false
 	if doDeps && !doSourceDeps {
-		if idx, err := repo.Load(cfg.LocalIndexPath()); err == nil {
-			binIdx = idx
-			hasBinIdx = true
+		if doSync && cfg.Repo.IndexURL != "" {
+			if idx, err := repo.SyncWithLog(cfg.Repo.IndexURL, cfg.LocalIndexPath(), timeout, stdout, styles.out); err == nil {
+				binIdx = idx
+				hasBinIdx = true
+			} else {
+				fmt.Fprintf(stderr, "%s could not sync index.json (%v); falling back to cached/source deps\n",
+					styles.err.BoldYellow("pe: warning:"), err)
+			}
+		}
+		if !hasBinIdx {
+			if idx, err := repo.Load(cfg.LocalIndexPath()); err == nil {
+				binIdx = idx
+				hasBinIdx = true
+			}
+		}
+	}
+
+	var plan []ports.BuildStep
+	if doDeps {
+		var binLookup ports.BinaryDepLookup
+		if hasBinIdx {
+			binLookup = func(name string) ([]string, bool) {
+				if e, ok := repo.Find(binIdx, name, cfg.Repo.Arch); ok {
+					return e.Depends, true
+				}
+				return nil, false
+			}
+		}
+		findPort := func(name string) (ports.Port, error) {
+			return ports.Find(cfg.Paths.PortsDir, cfg.Paths.Collections, name)
+		}
+		resolved, missing, err := ports.ResolveBuildPlan(directPorts, findPort, installedMap, binLookup)
+		if err != nil {
+			return err
+		}
+		if len(missing) > 0 {
+			fmt.Fprintf(stderr, "%s dependencies not found in binary index or ports tree: %s\n",
+				styles.err.BoldYellow("pe: warning:"), strings.Join(missing, ", "))
+		}
+		plan = resolved
+	} else {
+		for _, p := range directPorts {
+			pc := p
+			plan = append(plan, ports.BuildStep{
+				Name:     p.Name,
+				Port:     &pc,
+				IsTarget: true,
+			})
 		}
 	}
 
@@ -643,28 +669,24 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 		ErrOut:          stderr,
 	}
 
-	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
-
-	for _, p := range buildList {
-		isTarget := targetDirs[p.Dir] || targetNames[p.Name]
-
-		// Handle dependency ports (not explicitly targeted):
+	for _, step := range plan {
+		// Handle dependency steps (not explicitly targeted):
 		// 1) Skip if already installed in <root>/var/lib/pkg/db.
-		// 2) Prefer prebuilt binary from synced index.json unless --source-deps is set.
+		// 2) Install prebuilt binary from synced index.json when FromBinary is set.
 		// 3) Otherwise build from ports_dir and install into <root> so dependents can build.
-		if !isTarget {
-			if installedMap[p.Name] {
+		if !step.IsTarget {
+			if step.AlreadyInstalled || installedMap[step.Name] {
 				fmt.Fprintf(stdout, "%s dependency %s already installed, skipping\n",
-					styles.out.BoldCyan("==>"), styles.out.Bold(p.Name))
+					styles.out.BoldCyan("==>"), styles.out.Bold(step.Name))
 				continue
 			}
-			if hasBinIdx {
-				if entry, ok := repo.Find(binIdx, p.Name, cfg.Repo.Arch); ok {
+			if step.FromBinary && hasBinIdx {
+				if entry, ok := repo.Find(binIdx, step.Name, cfg.Repo.Arch); ok {
 					fmt.Fprintf(stdout, "%s installing binary dependency %s %s\n",
 						styles.out.BoldCyan("==>"), styles.out.Bold(entry.Pkgname), styles.out.Cyan(entry.FullVersion()))
 					localPath, err := repo.FetchBinaryWithStyle(entry, cfg.BinaryCacheDir(), timeout, stdout, styles.out)
 					if err != nil {
-						return fmt.Errorf("fetch dependency %s: %w", p.Name, err)
+						return fmt.Errorf("fetch dependency %s: %w", step.Name, err)
 					}
 					name, ver, err := pkgops.InstallArchive(localPath, pkgops.InstallOptions{
 						Root:          cfg.Paths.Root,
@@ -678,7 +700,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 						ErrOut:        stderr,
 					})
 					if err != nil {
-						return fmt.Errorf("install build dependency %s: %w", p.Name, err)
+						return fmt.Errorf("install build dependency %s: %w", step.Name, err)
 					}
 					installedMap[name] = true
 					fmt.Fprintf(stdout, "%s dependency %s %s\n", styles.out.BoldGreen("installed"), styles.out.Bold(name), styles.out.Cyan(ver))
@@ -686,6 +708,10 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 				}
 			}
 
+			if step.Port == nil {
+				return fmt.Errorf("dependency %s has no local Pkgfile or binary entry", step.Name)
+			}
+			p := *step.Port
 			depOpts := buildOpts
 			depOpts.Force = false
 			res, err := builder.Build(cfg, p, depOpts)
@@ -712,6 +738,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 		}
 
 		// Explicitly requested target port: always built from source.
+		p := *step.Port
 		targetOpts := buildOpts
 		targetOpts.Force = doForce || doReinstall
 		res, err := builder.Build(cfg, p, targetOpts)

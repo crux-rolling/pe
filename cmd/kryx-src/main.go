@@ -242,6 +242,7 @@ func cmdList(args []string, stdout, stderr io.Writer) error {
 			Collection  string   `json:"collection,omitempty"`
 			Description string   `json:"description,omitempty"`
 			Depends     []string `json:"depends,omitempty"`
+			MakeDepends []string `json:"make_depends,omitempty"`
 		}
 		out := make([]jsonEntry, 0, len(entries))
 		for _, e := range entries {
@@ -253,6 +254,7 @@ func cmdList(args []string, stdout, stderr io.Writer) error {
 				Collection:  e.Port.Collection,
 				Description: e.Port.Description,
 				Depends:     e.Port.Depends,
+				MakeDepends: e.Port.MakeDepends,
 			})
 		}
 		enc := json.NewEncoder(stdout)

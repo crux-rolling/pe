@@ -2,6 +2,8 @@ package srcmachine
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -189,5 +191,154 @@ build() { true; }
 	}
 	if _, err := reg.ExpandTargets([]string{"wrong-port"}, "kryx-linux/kernel"); err == nil {
 		t.Fatal("expected error for mismatched target in single-port repo")
+	}
+}
+
+func TestMakeDependsSatisfiedFromBinaryIndex(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Step 1: Build a prebuilt binary archive for `codegen` (simulating a remote binary repo).
+	toolPorts := filepath.Join(tmp, "tool-ports")
+	toolDir := filepath.Join(toolPorts, "opt", "codegen")
+	if err := os.MkdirAll(toolDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(toolDir, "Pkgfile"), []byte(`# Description: Build-time code generator
+name=codegen
+version=1.0
+release=1
+source=()
+build() {
+	install -d "$PKG/usr/share/codegen"
+	echo generated-ok > "$PKG/usr/share/codegen/marker"
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(tmp, "remote-bins")
+	var out, errOut bytes.Buffer
+	toolRes, err := Build(BuildOptions{
+		PortsDir:        toolPorts,
+		Targets:         []string{"codegen"},
+		WorkRoot:        filepath.Join(tmp, "tool-work"),
+		OutDir:          binDir,
+		Force:           true,
+		IgnoreFootprint: true,
+		IgnoreMD5Sum:    true,
+		IgnoreSignature: true,
+		NoStrip:         true,
+		Compression:     "gz",
+		SkipRootCheck:   true,
+		SkipLdconfig:    true,
+		ColorMode:       "never",
+		Out:             &out,
+		ErrOut:          &errOut,
+	})
+	if err != nil || len(toolRes.BuiltArchives) != 1 {
+		t.Fatalf("build codegen fixture failed: err=%v out=%s errOut=%s", err, out.String(), errOut.String())
+	}
+
+	// Serve the prebuilt binary over HTTP.
+	srv := httptest.NewServer(http.FileServer(http.Dir(binDir)))
+	defer srv.Close()
+
+	// Step 2: Create a single-port repo for `myapp` that has `# Make depends on: codegen`,
+	// with NO `codegen` port in its ports tree (binary-only make dep!).
+	appPorts := filepath.Join(tmp, "app-repo")
+	if err := os.MkdirAll(appPorts, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootDir := filepath.Join(tmp, "rootfs")
+	if err := os.MkdirAll(filepath.Join(rootDir, "var", "lib", "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootDir, "var", "lib", "pkg", "db"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	appPkgfile := `# Description: App built with binary make-dep
+# Depends on:
+# Make depends on: codegen
+name=myapp
+version=2.0
+release=1
+source=()
+build() {
+	test -f "` + filepath.Join(rootDir, "usr/share/codegen/marker") + `"
+	install -d "$PKG/usr/share/myapp"
+	cp "` + filepath.Join(rootDir, "usr/share/codegen/marker") + `" "$PKG/usr/share/myapp/built"
+}
+`
+	if err := os.WriteFile(filepath.Join(appPorts, "Pkgfile"), []byte(appPkgfile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed workRoot's cached index.json with the remote `codegen` binary.
+	workRoot := filepath.Join(tmp, "app-work")
+	indexPath := filepath.Join(workRoot, "cache", "index.json")
+	if _, err := Stage(StageOptions{
+		PackagesDir: binDir,
+		PortsDir:    toolPorts,
+		IndexPath:   indexPath,
+		BaseURL:     srv.URL,
+		Arch:        "x86_64",
+	}); err != nil {
+		t.Fatalf("Stage fixture index: %v", err)
+	}
+
+	// Step 3: Build `myapp` with --deps (binary-first). `codegen` must be installed
+	// from the binary index before `myapp` builds, and `myapp` must succeed!
+	appOutDir := filepath.Join(tmp, "app-dist")
+	out.Reset()
+	errOut.Reset()
+	appRes, err := Build(BuildOptions{
+		PortsDir:        appPorts,
+		Targets:         []string{"myapp"},
+		WorkRoot:        workRoot,
+		OutDir:          appOutDir,
+		Root:            rootDir,
+		WithDeps:        true,
+		Force:           true,
+		IgnoreFootprint: true,
+		IgnoreMD5Sum:    true,
+		IgnoreSignature: true,
+		NoStrip:         true,
+		Compression:     "gz",
+		SkipRootCheck:   true,
+		SkipLdconfig:    true,
+		ColorMode:       "never",
+		Out:             &out,
+		ErrOut:          &errOut,
+	})
+	if err != nil {
+		t.Fatalf("Build myapp with binary make-dep failed: %v\nstdout=%s\nstderr=%s", err, out.String(), errOut.String())
+	}
+	if len(appRes.BuiltArchives) != 1 || len(appRes.MissingDeps) != 0 {
+		t.Fatalf("unexpected build result: %+v", appRes)
+	}
+
+	// Step 4: Stage `myapp` and verify index.json keeps `depends` empty (runtime only)
+	// while recording `makedepends: ["codegen"]`.
+	finalIdxPath := filepath.Join(tmp, "final-index.json")
+	if _, err := Stage(StageOptions{
+		PackagesDir: appOutDir,
+		PortsDir:    appPorts,
+		IndexPath:   finalIdxPath,
+		Arch:        "x86_64",
+	}); err != nil {
+		t.Fatalf("Stage myapp: %v", err)
+	}
+	idx, err := repo.Load(finalIdxPath)
+	if err != nil {
+		t.Fatalf("repo.Load: %v", err)
+	}
+	entry, ok := repo.Find(idx, "myapp", "x86_64")
+	if !ok {
+		t.Fatalf("myapp not found in final index")
+	}
+	if len(entry.Depends) != 0 {
+		t.Fatalf("expected runtime Depends to be empty (make-deps must not leak into runtime depends), got %v", entry.Depends)
+	}
+	if len(entry.MakeDepends) != 1 || entry.MakeDepends[0] != "codegen" {
+		t.Fatalf("expected MakeDepends=[codegen], got %v", entry.MakeDepends)
 	}
 }

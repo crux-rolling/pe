@@ -537,6 +537,10 @@ when installing.
 .BR \-d ", " \-\-deps
 Resolve recursive
 .B Pkgfile
+runtime
+.RB ( "# Depends on:" )
+and build\-only
+.RB ( "# Make depends on:" )
 dependencies in topological order.
 Already\-installed dependencies are skipped.
 Uninstalled dependencies are installed into
@@ -545,9 +549,13 @@ before building downstream ports (using prebuilt binaries from synced
 .I index.json
 when available unless
 .B \-\-source\-deps
-is set, otherwise building them from
+is set, in which case only their runtime dependencies are needed; otherwise
+building them from
 .I ports_dir
 and installing the resulting archive).
+Binary\-only dependencies present in
+.I index.json
+are supported even when absent from the local ports tree.
 Requested target ports are always built from source and only installed
 when
 .BR \-i / \-\-install ,
@@ -555,6 +563,13 @@ when
 or
 .BR \-R / \-\-reinstall
 is passed.
+.TP
+.B \-\-sync
+With
+.BR \-d / \-\-deps ,
+synchronize the remote binary
+.I index.json
+before resolving binary dependencies.
 .TP
 .BR \-S ", " \-\-source\-deps
 With
@@ -1006,11 +1021,27 @@ Port maintainer information.
 Original packager information.
 .TP
 .B # Depends on: \fIpkg1 pkg2\fR ... \fR(also accepts \fB# Depends:\fR)
-Space\- or comma\-separated list of port dependencies used by
+Space\- or comma\-separated list of runtime dependencies used by
 .BR "pe build \-\-deps" ,
 .BR "pe install \-\-deps" ,
 and
 .BR "pe\-index \-\-ports" .
+.TP
+.B # Make depends on: \fIpkg1 pkg2\fR ... \fR(also accepts \fB# Make depends:\fR, \fB# Makedepends:\fR, \fB# Build depends on:\fR)
+Optional, fully backward\-compatible header listing build\-time\-only dependencies
+(such as compilers or code generators).
+Satisfied during
+.B pe build \-\-deps
+and
+.B kryx\-src pkg \-\-deps
+(binary\-first from
+.I index.json
+when available, otherwise built from source), and recorded separately from runtime
+.B depends
+so
+.B pe install \-\-deps
+does not pull build\-only tools onto end\-user systems.
+Ports omitting this header continue to work identically to stock CRUX.
 .SS Required and Optional Shell Definitions
 .B Pkgfile
 recipes are evaluated in

@@ -124,6 +124,7 @@ func Stage(opts StageOptions) (StageResult, error) {
 		if pm, ok := portMeta[name]; ok {
 			entry.Description = pm.Description
 			entry.Depends = pm.Depends
+			entry.MakeDepends = pm.MakeDepends
 			entry.Collection = pm.Collection
 		}
 

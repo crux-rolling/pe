@@ -297,7 +297,7 @@ func (r *Registry) ResolveDepsOrder(roots []Entry, includeDeps bool) (ordered []
 			return nil
 		}
 		visiting[key] = true
-		for _, dep := range e.Port.Depends {
+		for _, dep := range e.Port.AllBuildDepends() {
 			depEntry, ok := r.Resolve(dep)
 			if !ok {
 				if !missingSet[dep] {

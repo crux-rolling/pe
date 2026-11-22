@@ -118,13 +118,22 @@ func Lint(reg *Registry, entries []Entry) LintReport {
 			}
 		}
 
-		// Verify dependencies resolve in the full registry.
+		// Verify runtime and make dependencies resolve in the full registry.
 		for _, dep := range p.Depends {
 			if _, ok := reg.Resolve(dep); !ok {
 				report.Issues = append(report.Issues, Issue{
 					Severity: SeverityWarning,
 					Port:     label,
 					Message:  fmt.Sprintf("dependency %q not found in ports tree", dep),
+				})
+			}
+		}
+		for _, mdep := range p.MakeDepends {
+			if _, ok := reg.Resolve(mdep); !ok {
+				report.Issues = append(report.Issues, Issue{
+					Severity: SeverityWarning,
+					Port:     label,
+					Message:  fmt.Sprintf("make dependency %q not found in ports tree (may still be satisfied from binary index)", mdep),
 				})
 			}
 		}
@@ -160,7 +169,7 @@ func Lint(reg *Registry, entries []Entry) LintReport {
 	checkCycle = func(e Entry) {
 		state[e.Port.Dir] = 1
 		stack = append(stack, e.RelDir)
-		for _, dep := range e.Port.Depends {
+		for _, dep := range e.Port.AllBuildDepends() {
 			de, ok := reg.Resolve(dep)
 			if !ok {
 				continue

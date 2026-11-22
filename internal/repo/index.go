@@ -45,6 +45,7 @@ type Entry struct {
 	Size        int64    `json:"size"`
 	Description string   `json:"description,omitempty"`
 	Depends     []string `json:"depends,omitempty"`
+	MakeDepends []string `json:"makedepends,omitempty"`
 	Collection  string   `json:"collection,omitempty"`
 }
 
@@ -151,6 +152,9 @@ func Merge(idx *Index, entries ...Entry) {
 					}
 					if len(entry.Depends) == 0 {
 						entry.Depends = old.Depends
+					}
+					if len(entry.MakeDepends) == 0 {
+						entry.MakeDepends = old.MakeDepends
 					}
 					if entry.Collection == "" {
 						entry.Collection = old.Collection
