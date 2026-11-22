@@ -19,10 +19,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ezke5/pe/internal/archive"
-	"github.com/ezke5/pe/internal/config"
-	"github.com/ezke5/pe/internal/ports"
-	"github.com/ezke5/pe/internal/ui"
+	"github.com/kryx-linux/pe/internal/archive"
+	"github.com/kryx-linux/pe/internal/config"
+	"github.com/kryx-linux/pe/internal/ports"
+	"github.com/kryx-linux/pe/internal/ui"
 )
 
 // Options customizes a single Pkgfile build invocation.
