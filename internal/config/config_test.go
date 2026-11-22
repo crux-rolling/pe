@@ -15,7 +15,7 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Paths.PortsDir != "/usr/ports" {
 		t.Fatalf("expected ports_dir /usr/ports, got %q", cfg.Paths.PortsDir)
 	}
-	if cfg.Repo.Repository != "ezke5/packages" || cfg.Repo.Tag != "rolling-x86_64" {
+	if cfg.Repo.Repository != "kryx-linux/packages" || cfg.Repo.Tag != "rolling-x86_64" {
 		t.Fatalf("unexpected repo defaults: %+v", cfg.Repo)
 	}
 	if cfg.Build.Compression != "zst" {
@@ -58,7 +58,7 @@ package_dir = /srv/pkg
 work_dir = /srv/work
 
 [repo]
-repository = ezke5/packages
+repository = kryx-linux/packages
 tag = rolling-x86_64
 arch = x86_64
 timeout_seconds = 30
@@ -89,7 +89,7 @@ strip = false
 	if cfg.Build.Compression != "xz" || !cfg.Build.IgnoreFootprint || cfg.Build.Strip {
 		t.Fatalf("unexpected build flags: %+v", cfg.Build)
 	}
-	wantURL := "https://github.com/ezke5/packages/releases/download/rolling-x86_64/index.json"
+	wantURL := "https://github.com/kryx-linux/packages/releases/download/rolling-x86_64/index.json"
 	if cfg.Repo.IndexURL != wantURL {
 		t.Fatalf("IndexURL = %q, want %q", cfg.Repo.IndexURL, wantURL)
 	}
