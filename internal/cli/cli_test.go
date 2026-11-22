@@ -141,7 +141,7 @@ package_dir = ` + filepath.Join(base, "packages") + `
 work_dir = ` + filepath.Join(base, "work") + `
 
 [repo]
-repository = ezke5/packages
+repository = kryx-linux/packages
 tag = rolling-x86_64
 arch = x86_64
 index_url = ` + srv.URL + `/index.json
