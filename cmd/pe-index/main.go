@@ -13,9 +13,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ezke5/pe/internal/archive"
-	"github.com/ezke5/pe/internal/ports"
-	"github.com/ezke5/pe/internal/repo"
+	"github.com/kryx-linux/pe/internal/archive"
+	"github.com/kryx-linux/pe/internal/ports"
+	"github.com/kryx-linux/pe/internal/repo"
 )
 
 func main() {
