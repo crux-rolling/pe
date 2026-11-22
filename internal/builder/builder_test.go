@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ezke5/pe/internal/archive"
-	"github.com/ezke5/pe/internal/config"
-	"github.com/ezke5/pe/internal/ports"
+	"github.com/kryx-linux/pe/internal/archive"
+	"github.com/kryx-linux/pe/internal/config"
+	"github.com/kryx-linux/pe/internal/ports"
 )
 
 func TestBuildMinimalPkgfile(t *testing.T) {
