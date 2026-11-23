@@ -99,7 +99,7 @@ func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) 
 	switch cmd {
 	case "sync", "sy":
 		runErr = cmdSync(cfg, cmdArgs, stdout, stderr, styles)
-	case "update", "up":
+	case "update", "upgrade", "up":
 		runErr = cmdUpdate(cfg, cmdArgs, stdout, stderr, rt, styles)
 	case "install", "in", "i":
 		runErr = cmdInstall(cfg, cmdArgs, stdout, stderr, rt, styles)
@@ -111,6 +111,8 @@ func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) 
 		runErr = cmdList(cfg, cmdArgs, stdout, stderr, styles)
 	case "remove", "uninstall", "rm", "r":
 		runErr = cmdRemove(cfg, cmdArgs, stdout, stderr, rt, styles)
+	case "doctor", "check":
+		runErr = cmdDoctor(cfg, cmdArgs, stdout, stderr, styles)
 	case "help", "h", "-h", "--help":
 		printUsage(stdout)
 		return 0
@@ -211,12 +213,13 @@ Global options:
 
 Commands (with short aliases):
   sync, sy                sync binary index.json from kryx-linux/ports rolling-x86_64 (and optional -p/--ports)
-  update, up              upgrade installed packages binary-first (reports missing binaries for pe build)
+  update, upgrade, up     upgrade installed packages binary-first (installs newly added runtime deps too)
   install, in, i          install binary package(s) from index.json or local .pkg.tar.<ext> archive
   build, bld, b           build package(s) from local CRUX Pkgfile ports using pe.ini settings
   search, se, s           short-form search across binary index, local ports, and installed packages
   list, ls, l             list installed packages, ports (-p), binaries (-b), files (-f), owners (-o), or diff (-d)
   remove, rm, r, uninstall  remove installed package(s) using CRUX pkgrm policy
+  doctor, check           check PATH shadowing (/sbin/pe), pkgdb, config, CA certs, ports, and index health
 `)
 }
 
@@ -486,9 +489,56 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 		return nil
 	}
 
+	// Resolve any newly introduced runtime dependencies for upgraded packages so
+	// upgrades never leave missing shared libraries or runtime tools behind.
+	upgradeNames := make([]string, 0, len(toUpgrade))
+	upgradeSet := make(map[string]bool, len(toUpgrade))
+	for _, e := range toUpgrade {
+		upgradeNames = append(upgradeNames, e.Pkgname)
+		upgradeSet[e.Pkgname] = true
+	}
+	planned := resolveBinaryDeps(cfg, idx, upgradeNames, db.Packages)
+	var newDepEntries []repo.Entry
+	for _, depName := range planned {
+		if upgradeSet[depName] || db.FindPkg(depName) {
+			continue
+		}
+		if e, ok := repo.Find(idx, depName, cfg.Repo.Arch); ok {
+			newDepEntries = append(newDepEntries, e)
+		}
+	}
+
 	doForce := *force || *forceShort
 	doVerbose := *verbose || *verboseShort
 	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
+	upgradedSelf := false
+
+	for _, depEntry := range newDepEntries {
+		localPath, err := repo.FetchBinaryWithStyle(depEntry, cfg.BinaryCacheDir(), timeout, stdout, styles.out)
+		if err != nil {
+			return err
+		}
+		name, ver, err := pkgops.InstallArchive(localPath, pkgops.InstallOptions{
+			Root:          cfg.Paths.Root,
+			PkgaddConf:    cfg.Paths.PkgaddConf,
+			Reinstall:     true,
+			Force:         doForce,
+			Verbose:       doVerbose,
+			SkipRootCheck: rt.SkipRootCheck,
+			SkipLdconfig:  rt.SkipLdconfig,
+			Out:           stdout,
+			ErrOut:        stderr,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "%s dependency %s %s\n",
+			styles.out.BoldGreen("installed"),
+			styles.out.Bold(name),
+			styles.out.Cyan(ver),
+		)
+	}
+
 	for _, entry := range toUpgrade {
 		oldVer := db.Packages[entry.Pkgname].Version
 		localPath, err := repo.FetchBinaryWithStyle(entry, cfg.BinaryCacheDir(), timeout, stdout, styles.out)
@@ -509,12 +559,19 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 		if err != nil {
 			return err
 		}
+		if name == "pe" {
+			upgradedSelf = true
+		}
 		fmt.Fprintf(stdout, "%s %s %s -> %s\n",
 			styles.out.BoldGreen("updated"),
 			styles.out.Bold(name),
 			styles.out.Yellow(oldVer),
 			styles.out.Green(newVer),
 		)
+	}
+	if upgradedSelf {
+		fmt.Fprintf(stdout, "%s pe was upgraded; run %s in open shells to refresh command path cache\n",
+			styles.out.BoldCyan("note:"), styles.out.Bold("hash -r"))
 	}
 	return nil
 }

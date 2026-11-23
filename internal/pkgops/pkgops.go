@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/kryx-linux/pe/internal/archive"
 	"github.com/kryx-linux/pe/internal/pkgdb"
@@ -129,12 +130,25 @@ func InstallArchive(archivePath string, opts InstallOptions) (pkgName, version s
 			_ = db.Commit()
 			return "", "", fmt.Errorf("install failed for %s: %w", name, err)
 		}
+		return "", "", fmt.Errorf("upgrade extraction failed for %s: %w", name, err)
 	}
 
 	if !opts.SkipLdconfig {
 		pkgdb.RunLdconfig(opts.Root, opts.ErrOut)
 	}
 	return name, info.Version, nil
+}
+
+// TouchesPathBinaries reports whether any file path in a package resides in a
+// standard executable PATH directory (bin/, sbin/, usr/bin/, usr/sbin/).
+func TouchesPathBinaries(files map[string]struct{}) bool {
+	for f := range files {
+		if strings.HasPrefix(f, "bin/") || strings.HasPrefix(f, "sbin/") ||
+			strings.HasPrefix(f, "usr/bin/") || strings.HasPrefix(f, "usr/sbin/") {
+			return true
+		}
+	}
+	return false
 }
 
 // RemovePackage removes an installed package from opts.Root following CRUX pkgrm.cc policy.

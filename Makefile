@@ -10,7 +10,7 @@ VERSION ?= 0.1.0
 LDFLAGS := -s -w -X github.com/kryx-linux/pe/internal/cli.Version=$(VERSION)
 GO_SRCS := $(shell find cmd internal -type f -name '*.go') go.mod
 
-.PHONY: all build test verify clean install uninstall
+.PHONY: all build test verify clean install uninstall clean-legacy purge
 
 all: build
 
@@ -46,6 +46,22 @@ install: build
 	if [ ! -f $(DESTDIR)$(ETCDIR)/pe.ini ]; then \
 		install -D -m 0644 pe.ini.example $(DESTDIR)$(ETCDIR)/pe.ini; \
 	fi
+	@if [ -z "$(DESTDIR)" ]; then \
+		for stale in /sbin/pe /sbin/pe-index /sbin/kryx-src /usr/local/bin/pe /usr/local/bin/pe-index /usr/local/bin/kryx-src; do \
+			if [ -e "$$stale" ]; then \
+				echo "WARNING: legacy binary found at $$stale (may shadow $(BINDIR)/pe in PATH). Run 'make clean-legacy' and 'hash -r'."; \
+			fi; \
+		done; \
+	fi
+
+clean-legacy:
+	rm -f $(DESTDIR)/sbin/pe \
+	      $(DESTDIR)/sbin/pe-index \
+	      $(DESTDIR)/sbin/kryx-src \
+	      $(DESTDIR)/usr/local/bin/pe \
+	      $(DESTDIR)/usr/local/bin/pe-index \
+	      $(DESTDIR)/usr/local/bin/kryx-src
+	@echo "Legacy binaries removed. Run 'hash -r' in your shell to clear cached command paths."
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/pe \
@@ -57,6 +73,12 @@ uninstall:
 	      $(DESTDIR)$(BASHCOMPDIR)/pe \
 	      $(DESTDIR)$(BASHCOMPDIR)/pe-index \
 	      $(DESTDIR)$(PROFILED)/pe-completion.sh
+	@echo "Uninstalled pe tools. Run 'make clean-legacy' if older /sbin/pe exists, then 'hash -r'."
+
+purge: uninstall clean-legacy
+	rm -rf $(DESTDIR)$(ETCDIR)/pe.ini \
+	       $(DESTDIR)$(ETCDIR)/pe \
+	       $(DESTDIR)/var/cache/pe
 
 clean:
 	rm -rf bin
