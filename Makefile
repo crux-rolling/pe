@@ -6,7 +6,7 @@ ETCDIR ?= /etc
 PROFILED ?= $(ETCDIR)/profile.d
 DESTDIR ?=
 
-VERSION ?= 0.5.2
+VERSION ?= 0.5.3
 LDFLAGS := -s -w -X github.com/kryx-linux/pe/internal/cli.Version=$(VERSION)
 GO_SRCS := $(shell find cmd internal -type f -name '*.go') go.mod
 
