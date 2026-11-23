@@ -66,13 +66,17 @@ cleanup() {
     for (( i=${#MOUNTED[@]}-1; i>=0; i-- )); do
         local m="${MOUNTED[$i]}"
         if is_mounted "$m"; then
-            umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null || true
+            umount -R "$m" 2>/dev/null || umount -R -l "$m" 2>/dev/null || true
         fi
     done
 }
 trap cleanup EXIT INT TERM
 
 do_mount "${TARGET_ROOT}/dev"     --rbind /dev
+# The host root is usually shared (systemd default). Make the /dev bind tree a
+# slave so unmounting it on exit cannot propagate back and unmount the host's
+# /dev/pts, /dev/shm, /dev/mqueue (which breaks PTY allocation on the host).
+mount --make-rslave "${TARGET_ROOT}/dev"
 do_mount "${TARGET_ROOT}/dev/pts" -t devpts -o gid=5,mode=620 devpts
 do_mount "${TARGET_ROOT}/proc"    -t proc proc
 do_mount "${TARGET_ROOT}/sys"     -t sysfs sysfs
