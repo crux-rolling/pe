@@ -27,7 +27,7 @@ import (
 )
 
 // Version is injected at link time via -ldflags.
-var Version = "0.1.0"
+var Version = "0.5.1"
 
 // RuntimeOptions allows tests to run package transactions against temporary roots
 // without requiring root privileges or running host ldconfig.
