@@ -37,6 +37,9 @@ install: build
 	install -D -m 0755 bin/pe $(DESTDIR)$(BINDIR)/pe
 	install -D -m 0755 bin/pe-index $(DESTDIR)$(BINDIR)/pe-index
 	install -D -m 0755 bin/kryx-src $(DESTDIR)$(BINDIR)/kryx-src
+	install -D -m 0755 scripts/setup $(DESTDIR)$(BINDIR)/setup
+	install -D -m 0755 scripts/setup-chroot $(DESTDIR)$(BINDIR)/setup-chroot
+	install -D -m 0755 scripts/setup-repo $(DESTDIR)$(BINDIR)/setup-repo
 	install -D -m 0644 man/pe.8 $(DESTDIR)$(MANDIR)/man8/pe.8
 	install -D -m 0644 man/pe-index.8 $(DESTDIR)$(MANDIR)/man8/pe-index.8
 	install -D -m 0644 man/kryx-src.8 $(DESTDIR)$(MANDIR)/man8/kryx-src.8
@@ -67,6 +70,9 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/pe \
 	      $(DESTDIR)$(BINDIR)/pe-index \
 	      $(DESTDIR)$(BINDIR)/kryx-src \
+	      $(DESTDIR)$(BINDIR)/setup \
+	      $(DESTDIR)$(BINDIR)/setup-chroot \
+	      $(DESTDIR)$(BINDIR)/setup-repo \
 	      $(DESTDIR)$(MANDIR)/man8/pe.8 \
 	      $(DESTDIR)$(MANDIR)/man8/pe-index.8 \
 	      $(DESTDIR)$(MANDIR)/man8/kryx-src.8 \

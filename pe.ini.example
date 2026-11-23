@@ -8,12 +8,12 @@
 # Installation root (standard CRUX root is /)
 root = /
 
-# CRUX ports tree location (kept in place; pe never relocates your ports tree)
+# CRUX ports tree location(s) (comma- or colon-separated priority order)
 ports_dir = /usr/ports
 
 # Comma- or space-separated port collections in priority order
 # Leave empty to auto-discover all collections under ports_dir
-collections = core, opt, xorg, contrib
+collections = rolling, core, opt, xorg, contrib
 
 # Directory for cached binary packages and synced index.json
 cache_dir = /var/cache/pe
@@ -30,19 +30,35 @@ work_dir = /var/cache/pe/work
 # CRUX pkgadd configuration file (INSTALL/UPGRADE rules)
 pkgadd_conf = /etc/pkgadd.conf
 
+# Trusted Ed25519 release signing public keys (*.pub, kryx-ed25519 or ssh-ed25519)
+keys_dir = /etc/pe/keys.d
+
 # CRUX ports sync config/drivers directories
 ports_conf_dir = /etc/ports
 ports_drivers_dir = /etc/ports/drivers
 
 [repo]
-# Binary repository release index (kryx-linux/ports rolling-x86_64)
+# Primary binary repository release index (kryx-linux/ports rolling-x86_64)
 repository = kryx-linux/ports
 tag = rolling-x86_64
 arch = x86_64
 index_url = https://github.com/kryx-linux/ports/releases/download/rolling-x86_64/index.json
+verify_signature = false
 
 # HTTP timeout in seconds for syncing index.json and downloading binaries
 timeout_seconds = 120
+
+# Optional multi-repo configuration (priority order: first defined wins):
+# [repo.rolling]
+# repository = kryx-linux/ports
+# tag = rolling-x86_64
+# arch = x86_64
+# verify_signature = true
+#
+# [repo.testing]
+# repository = kryx-linux/ports
+# tag = testing-x86_64
+# arch = x86_64
 
 [build]
 # Parallel build jobs (exported as JOBS and used in MAKEFLAGS if makeflags is unset)

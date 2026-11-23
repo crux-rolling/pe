@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -113,6 +114,8 @@ func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) 
 		runErr = cmdRemove(cfg, cmdArgs, stdout, stderr, rt, styles)
 	case "doctor", "check":
 		runErr = cmdDoctor(cfg, cmdArgs, stdout, stderr, styles)
+	case "key":
+		runErr = cmdKey(cfg, cmdArgs, stdout, stderr, styles)
 	case "help", "h", "-h", "--help":
 		printUsage(stdout)
 		return 0
@@ -220,6 +223,7 @@ Commands (with short aliases):
   list, ls, l             list installed packages, ports (-p), binaries (-b), files (-f), owners (-o), or diff (-d)
   remove, rm, r, uninstall  remove installed package(s) using CRUX pkgrm policy
   doctor, check           check PATH shadowing (/sbin/pe), pkgdb, config, CA certs, ports, and index health
+  key                     manage trusted Ed25519 release signing keys (gen, list, trust, revoke)
 `)
 }
 
@@ -230,25 +234,47 @@ func cmdSync(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 	fs.SetOutput(stderr)
 	syncPorts := fs.Bool("ports", false, "also sync CRUX ports collections via /etc/ports/drivers")
 	syncPortsShort := fs.Bool("p", false, "also sync CRUX ports collections via /etc/ports/drivers")
+	verifySig := fs.Bool("verify", false, "require Ed25519 signature verification of index.json.sig")
+	allowUntrusted := fs.Bool("allow-untrusted", false, "bypass signature verification (for initial setup or key migration)")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 
-	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
-	idx, err := repo.SyncWithLog(cfg.Repo.IndexURL, cfg.LocalIndexPath(), timeout, stdout, styles.out)
-	if err != nil {
-		if errors.Is(err, os.ErrPermission) {
-			return fmt.Errorf("%w (run with sudo or configure cache_dir in pe.ini)", err)
+	repos := cfg.AllRepos()
+	for _, r := range repos {
+		timeout := time.Duration(r.TimeoutSeconds) * time.Second
+		idxPath := cfg.RepoIndexPath(r.Name)
+		idx, err := repo.SyncWithLog(r.IndexURL, idxPath, timeout, stdout, styles.out)
+		if err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				return fmt.Errorf("%w (run with sudo or configure cache_dir in pe.ini)", err)
+			}
+			return fmt.Errorf("sync repo %s: %w", r.Name, err)
 		}
-		return err
+
+		needVerify := (*verifySig || r.VerifySignature) && !*allowUntrusted
+		if needVerify {
+			pk, verr := fetchAndVerifyIndexSig(r.IndexURL, idxPath, cfg.Paths.KeysDir, timeout)
+			if verr != nil {
+				_ = os.Remove(idxPath)
+				return fmt.Errorf("signature verification failed for repo %s: %w", r.Name, verr)
+			}
+			fmt.Fprintf(stdout, "%s verified %s signature with key %s (%s)\n",
+				styles.out.BoldGreen("==>"), r.Name, styles.out.Bold(pk.KeyID), pk.Name)
+		}
+
+		label := r.Repository
+		if label == "" {
+			label = r.Name
+		}
+		fmt.Fprintf(stdout, "%s %s (%d packages) from %s (%s)\n",
+			styles.out.BoldGreen("synced"),
+			idxPath,
+			len(idx.Packages),
+			styles.out.Bold(label),
+			styles.out.Cyan(r.Tag),
+		)
 	}
-	fmt.Fprintf(stdout, "%s %s (%d packages) from %s (%s)\n",
-		styles.out.BoldGreen("synced"),
-		cfg.LocalIndexPath(),
-		len(idx.Packages),
-		styles.out.Bold(cfg.Repo.Repository),
-		styles.out.Cyan(cfg.Repo.Tag),
-	)
 
 	if *syncPorts || *syncPortsShort {
 		cols := fs.Args()
@@ -629,18 +655,35 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 	doSourceDeps := *sourceDeps || *sourceDepsShort
 	doVerbose := *verbose || *verboseShort
 
-	// Expand targets: each target may be a single port (found recursively at any depth)
-	// or a directory/collection under ports_dir containing nested Pkgfiles.
+	// Expand targets: each target may be:
+	//   - "." or a local directory containing Pkgfile or .kryx/Pkgfile (Nix-like repo build)
+	//   - a git URL (https://...@ref or git://...) containing a root Pkgfile or .kryx/Pkgfile
+	//   - a single port across any configured ports_dir (multi-ports priority order)
+	//   - a collection/directory under ports_dir containing nested Pkgfiles
 	var directPorts []ports.Port
 	for _, t := range targets {
-		p, err := ports.Find(cfg.Paths.PortsDir, cfg.Paths.Collections, t)
+		if p, ok, perr := resolveNixLikeOrLocalTarget(cfg, t, stdout); ok || perr != nil {
+			if perr != nil {
+				return perr
+			}
+			directPorts = append(directPorts, p)
+			continue
+		}
+		p, err := findPortAcrossDirs(cfg, t)
 		if err == nil {
 			directPorts = append(directPorts, p)
 			continue
 		}
-		group, gerr := ports.FindGroup(cfg.Paths.PortsDir, t)
-		if gerr != nil {
-			return gerr
+		var group []ports.Port
+		for _, pdir := range cfg.EffectivePortsDirs() {
+			g, gerr := ports.FindGroup(pdir, t)
+			if gerr != nil {
+				return gerr
+			}
+			if len(g) > 0 {
+				group = g
+				break
+			}
 		}
 		if len(group) > 0 {
 			directPorts = append(directPorts, group...)
@@ -692,7 +735,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 			}
 		}
 		findPort := func(name string) (ports.Port, error) {
-			return ports.Find(cfg.Paths.PortsDir, cfg.Paths.Collections, name)
+			return findPortAcrossDirs(cfg, name)
 		}
 		resolved, missing, err := ports.ResolveBuildPlan(directPorts, findPort, installedMap, binLookup)
 		if err != nil {
@@ -897,21 +940,29 @@ func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer, style
 		}
 	}
 
-	// 2. Local ports tree
+	// 2. Local ports tree(s)
 	if includeAll || fPorts {
-		if allPorts, err := ports.DiscoverAll(cfg.Paths.PortsDir, cfg.Paths.Collections); err == nil {
-			for _, p := range allPorts {
-				r := getRec(p.Name)
-				r.port = true
-				if r.version == "" {
-					r.version = p.FullVersion()
+		foundAnyPorts := false
+		var lastErr error
+		for _, pdir := range cfg.EffectivePortsDirs() {
+			if allPorts, err := ports.DiscoverAll(pdir, cfg.Paths.Collections); err == nil {
+				foundAnyPorts = true
+				for _, p := range allPorts {
+					r := getRec(p.Name)
+					r.port = true
+					if r.version == "" {
+						r.version = p.FullVersion()
+					}
+					if r.description == "" {
+						r.description = p.Description
+					}
 				}
-				if r.description == "" {
-					r.description = p.Description
-				}
+			} else {
+				lastErr = err
 			}
-		} else if fPorts {
-			return err
+		}
+		if !foundAnyPorts && fPorts && lastErr != nil {
+			return lastErr
 		}
 	}
 
@@ -1040,10 +1091,26 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 		if fs.NArg() > 0 {
 			cols = fs.Args()
 		}
-		entries, err := ports.ListEntries(cfg.Paths.PortsDir, cols)
-		if err != nil {
-			return err
+		seen := make(map[string]bool)
+		var entries []string
+		var lastErr error
+		for _, pdir := range cfg.EffectivePortsDirs() {
+			es, err := ports.ListEntries(pdir, cols)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			for _, e := range es {
+				if !seen[e] {
+					seen[e] = true
+					entries = append(entries, e)
+				}
+			}
 		}
+		if len(entries) == 0 && lastErr != nil {
+			return lastErr
+		}
+		sort.Strings(entries)
 		for _, e := range entries {
 			if idx := strings.LastIndex(e, "/"); idx > 0 && styles.out.Enabled {
 				fmt.Fprintf(stdout, "%s/%s\n", styles.out.Dim(e[:idx]), styles.out.Bold(e[idx+1:]))
@@ -1119,7 +1186,7 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 		if err != nil {
 			return err
 		}
-		idx, _ := repo.Load(cfg.LocalIndexPath())
+		idx, _ := loadLocalIndex(cfg)
 		portMap := discoverPortMap(cfg)
 
 		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
@@ -1213,27 +1280,126 @@ func openDBReadOnly(root string) (*pkgdb.DB, error) {
 }
 
 func loadLocalIndex(cfg config.Config) (repo.Index, error) {
-	path := cfg.LocalIndexPath()
-	idx, err := repo.Load(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "no such file") {
-			return repo.Index{}, fmt.Errorf("local index %s not found; run `pe sync` first", path)
+	repos := cfg.AllRepos()
+	if len(repos) == 1 && repos[0].Name == "default" {
+		path := cfg.LocalIndexPath()
+		idx, err := repo.Load(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "no such file") {
+				return repo.Index{}, fmt.Errorf("local index %s not found; run `pe sync` first", path)
+			}
+			if errors.Is(err, os.ErrPermission) {
+				return repo.Index{}, fmt.Errorf("cannot read local index %s: permission denied (run `sudo pe sync` to refresh permissions)", path)
+			}
+			return repo.Index{}, err
 		}
-		if errors.Is(err, os.ErrPermission) {
-			return repo.Index{}, fmt.Errorf("cannot read local index %s: permission denied (run `sudo pe sync` to refresh permissions)", path)
-		}
-		return repo.Index{}, err
+		return idx, nil
 	}
-	return idx, nil
+
+	merged := repo.New()
+	loadedAny := false
+	// Load in reverse priority order so earlier (higher-priority) repos override later ones.
+	for i := len(repos) - 1; i >= 0; i-- {
+		r := repos[i]
+		p := cfg.RepoIndexPath(r.Name)
+		idx, err := repo.Load(p)
+		if err != nil {
+			continue
+		}
+		loadedAny = true
+		for pkgName, grp := range idx.Packages {
+			merged.Packages[pkgName] = grp
+		}
+	}
+	if !loadedAny {
+		return repo.Index{}, fmt.Errorf("no synced repository indexes found under %s; run `pe sync` first", cfg.Paths.CacheDir)
+	}
+	return merged, nil
+}
+
+func findPortAcrossDirs(cfg config.Config, target string) (ports.Port, error) {
+	dirs := cfg.EffectivePortsDirs()
+	var lastErr error
+	for _, dir := range dirs {
+		p, err := ports.Find(dir, cfg.Paths.Collections, target)
+		if err == nil {
+			return p, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return ports.Port{}, lastErr
+	}
+	return ports.Port{}, fmt.Errorf("port %q not found", target)
+}
+
+// resolveNixLikeOrLocalTarget supports building directly from:
+//   - "." or any local directory containing Pkgfile or .kryx/Pkgfile
+//   - a remote Git repository URL (https://..., http://..., git://..., ssh://..., optional @ref suffix)
+func resolveNixLikeOrLocalTarget(cfg config.Config, target string, out io.Writer) (ports.Port, bool, error) {
+	// 1. Remote Git URL (Nix-like direct repo build)
+	if strings.HasPrefix(target, "https://") || strings.HasPrefix(target, "http://") ||
+		strings.HasPrefix(target, "git://") || strings.HasPrefix(target, "ssh://") {
+		repoURL := target
+		ref := ""
+		if at := strings.LastIndex(target, "@"); at > strings.Index(target, "://")+3 {
+			repoURL = target[:at]
+			ref = target[at+1:]
+		}
+		slug := strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(strings.TrimSuffix(repoURL, ".git"))
+		if len(slug) > 48 {
+			slug = slug[len(slug)-48:]
+		}
+		cloneDir := filepath.Join(cfg.Paths.WorkDir, ".git-ports", slug)
+		_ = os.RemoveAll(cloneDir)
+		if err := os.MkdirAll(filepath.Dir(cloneDir), 0o755); err != nil {
+			return ports.Port{}, true, err
+		}
+		cloneArgs := []string{"clone", "--depth=1"}
+		if ref != "" {
+			cloneArgs = append(cloneArgs, "--branch", ref)
+		}
+		cloneArgs = append(cloneArgs, repoURL, cloneDir)
+		cmd := exec.Command("git", cloneArgs...)
+		cmd.Stdout = out
+		cmd.Stderr = out
+		if err := cmd.Run(); err != nil {
+			return ports.Port{}, true, fmt.Errorf("clone remote port repo %s: %w", target, err)
+		}
+		pkgDir := cloneDir
+		if _, err := os.Stat(filepath.Join(cloneDir, "Pkgfile")); err != nil {
+			if _, err2 := os.Stat(filepath.Join(cloneDir, ".kryx", "Pkgfile")); err2 == nil {
+				pkgDir = filepath.Join(cloneDir, ".kryx")
+			} else {
+				return ports.Port{}, true, fmt.Errorf("remote repo %s contains neither Pkgfile nor .kryx/Pkgfile", target)
+			}
+		}
+		p, err := ports.ParsePkgfile(pkgDir, filepath.Dir(cloneDir))
+		return p, true, err
+	}
+
+	// 2. Local directory (e.g. ".", "./myrepo", "/abs/path/to/repo") with Pkgfile or .kryx/Pkgfile
+	if target == "." || target == ".." || strings.HasPrefix(target, "./") || strings.HasPrefix(target, "../") || filepath.IsAbs(target) {
+		absDir, err := filepath.Abs(target)
+		if err != nil {
+			return ports.Port{}, false, nil
+		}
+		pkgDir := ""
+		if fi, err := os.Stat(filepath.Join(absDir, "Pkgfile")); err == nil && !fi.IsDir() {
+			pkgDir = absDir
+		} else if fi, err := os.Stat(filepath.Join(absDir, ".kryx", "Pkgfile")); err == nil && !fi.IsDir() {
+			pkgDir = filepath.Join(absDir, ".kryx")
+		}
+		if pkgDir != "" {
+			p, perr := ports.ParsePkgfile(pkgDir, filepath.Dir(absDir))
+			return p, true, perr
+		}
+	}
+	return ports.Port{}, false, nil
 }
 
 func discoverPortMap(cfg config.Config) map[string]ports.Port {
 	result := make(map[string]ports.Port)
-	all, err := ports.DiscoverAll(cfg.Paths.PortsDir, cfg.Paths.Collections)
-	if err != nil {
-		return result
-	}
-	// Preserve collection priority order (first occurrence wins).
 	colRank := make(map[string]int, len(cfg.Paths.Collections))
 	for i, c := range cfg.Paths.Collections {
 		colRank[c] = i
@@ -1244,9 +1410,15 @@ func discoverPortMap(cfg config.Config) map[string]ports.Port {
 		}
 		return len(colRank) + 1
 	}
-	for _, p := range all {
-		if existing, ok := result[p.Name]; !ok || rankOf(p.Collection) < rankOf(existing.Collection) {
-			result[p.Name] = p
+	for _, dir := range cfg.EffectivePortsDirs() {
+		all, err := ports.DiscoverAll(dir, cfg.Paths.Collections)
+		if err != nil {
+			continue
+		}
+		for _, p := range all {
+			if existing, ok := result[p.Name]; !ok || rankOf(p.Collection) < rankOf(existing.Collection) {
+				result[p.Name] = p
+			}
 		}
 	}
 	return result

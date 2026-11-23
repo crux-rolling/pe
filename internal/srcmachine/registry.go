@@ -64,14 +64,19 @@ func LoadRegistry(portsDir string, collections []string) (*Registry, error) {
 		reg.collectionRank[c] = i
 	}
 
-	// Single-port repository (Pkgfile directly at repo root).
-	rootPkgfile := filepath.Join(absPorts, "Pkgfile")
-	if fi, statErr := os.Stat(rootPkgfile); statErr == nil && !fi.IsDir() {
-		p, parseErr := ports.ParsePkgfileFast(absPorts, filepath.Dir(absPorts))
+	// Single-port repository (Pkgfile directly at repo root, or Nix-like .kryx/Pkgfile).
+	rootPkgDir := ""
+	if fi, statErr := os.Stat(filepath.Join(absPorts, "Pkgfile")); statErr == nil && !fi.IsDir() {
+		rootPkgDir = absPorts
+	} else if fi, statErr := os.Stat(filepath.Join(absPorts, ".kryx", "Pkgfile")); statErr == nil && !fi.IsDir() {
+		rootPkgDir = filepath.Join(absPorts, ".kryx")
+	}
+	if rootPkgDir != "" {
+		p, parseErr := ports.ParsePkgfileFast(rootPkgDir, filepath.Dir(absPorts))
 		if parseErr != nil {
-			return nil, fmt.Errorf("parse root Pkgfile in %s: %w", absPorts, parseErr)
+			return nil, fmt.Errorf("parse root Pkgfile in %s: %w", rootPkgDir, parseErr)
 		}
-		p.Dir = absPorts
+		p.Dir = rootPkgDir
 		p.RelDir = p.Name
 		p.Collection = ""
 		e := Entry{

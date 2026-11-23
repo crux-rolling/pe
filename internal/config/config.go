@@ -23,8 +23,20 @@ const (
 type Config struct {
 	Paths PathsConfig
 	Repo  RepoConfig
+	Repos []NamedRepo // Optional multi-repo definitions from [repo.<name>] sections (in priority order)
 	Build BuildConfig
 	UI    UIConfig
+}
+
+// NamedRepo defines one named binary repository from a [repo.<name>] section.
+type NamedRepo struct {
+	Name            string
+	Repository      string
+	Tag             string
+	Arch            string
+	IndexURL        string
+	TimeoutSeconds  int
+	VerifySignature bool
 }
 
 // UIConfig configures terminal output behavior.
@@ -36,23 +48,26 @@ type UIConfig struct {
 type PathsConfig struct {
 	Root            string
 	PortsDir        string
+	PortsDirs       []string // Optional priority-ordered multi-ports directories
 	Collections     []string
 	CacheDir        string
 	SourceCache     string
 	PackageDir      string
 	WorkDir         string
 	PkgaddConf      string
+	KeysDir         string
 	PortsConfDir    string
 	PortsDriversDir string
 }
 
 // RepoConfig configures the binary-first release index source.
 type RepoConfig struct {
-	Repository     string
-	Tag            string
-	Arch           string
-	IndexURL       string
-	TimeoutSeconds int
+	Repository      string
+	Tag             string
+	Arch            string
+	IndexURL        string
+	TimeoutSeconds  int
+	VerifySignature bool
 }
 
 // BuildConfig configures Pkgfile builds (`pe build`), adapted from CRUX pkgmk.conf.
@@ -93,6 +108,7 @@ func Default() Config {
 			PackageDir:      "/var/cache/pe/packages",
 			WorkDir:         "/var/cache/pe/work",
 			PkgaddConf:      "/etc/pkgadd.conf",
+			KeysDir:         "/etc/pe/keys.d",
 			PortsConfDir:    "/etc/ports",
 			PortsDriversDir: "/etc/ports/drivers",
 		},
@@ -165,6 +181,24 @@ func Parse(input string, cfg *Config) error {
 	makeflagsSet := false
 	cxxflagsSet := false
 	indexURLSet := false
+	namedRepos := make(map[string]*NamedRepo)
+	namedRepoOrder := make([]string, 0)
+	namedIndexURLSet := make(map[string]bool)
+
+	getOrCreateNamedRepo := func(name string) *NamedRepo {
+		if nr, ok := namedRepos[name]; ok {
+			return nr
+		}
+		nr := &NamedRepo{
+			Name:            name,
+			Arch:            cfg.Repo.Arch,
+			TimeoutSeconds:  cfg.Repo.TimeoutSeconds,
+			VerifySignature: cfg.Repo.VerifySignature,
+		}
+		namedRepos[name] = nr
+		namedRepoOrder = append(namedRepoOrder, name)
+		return nr
+	}
 
 	for scanner.Scan() {
 		lineNum++
@@ -194,7 +228,20 @@ func Parse(input string, cfg *Config) error {
 			case "root":
 				cfg.Paths.Root = val
 			case "ports_dir":
-				cfg.Paths.PortsDir = val
+				dirs := splitPathList(val)
+				if len(dirs) > 1 {
+					cfg.Paths.PortsDir = dirs[0]
+					cfg.Paths.PortsDirs = dirs
+				} else {
+					cfg.Paths.PortsDir = val
+					cfg.Paths.PortsDirs = nil
+				}
+			case "ports_dirs":
+				dirs := splitPathList(val)
+				cfg.Paths.PortsDirs = dirs
+				if len(dirs) > 0 {
+					cfg.Paths.PortsDir = dirs[0]
+				}
 			case "collections":
 				cfg.Paths.Collections = splitList(val)
 			case "cache_dir":
@@ -207,6 +254,8 @@ func Parse(input string, cfg *Config) error {
 				cfg.Paths.WorkDir = val
 			case "pkgadd_conf":
 				cfg.Paths.PkgaddConf = val
+			case "keys_dir":
+				cfg.Paths.KeysDir = val
 			case "ports_conf_dir":
 				cfg.Paths.PortsConfDir = val
 			case "ports_drivers_dir":
@@ -231,6 +280,12 @@ func Parse(input string, cfg *Config) error {
 					return fmt.Errorf("line %d: invalid timeout_seconds %q: %w", lineNum, val, err)
 				}
 				cfg.Repo.TimeoutSeconds = n
+			case "verify_signature":
+				b, err := parseBool(val)
+				if err != nil {
+					return fmt.Errorf("line %d: invalid verify_signature %q", lineNum, val)
+				}
+				cfg.Repo.VerifySignature = b
 			default:
 				return fmt.Errorf("line %d: unknown key %q in [repo]", lineNum, key)
 			}
@@ -321,6 +376,36 @@ func Parse(input string, cfg *Config) error {
 				return fmt.Errorf("line %d: unknown key %q in [ui]", lineNum, key)
 			}
 		default:
+			if strings.HasPrefix(section, "repo.") && len(section) > len("repo.") {
+				rname := strings.TrimSpace(strings.TrimPrefix(section, "repo."))
+				nr := getOrCreateNamedRepo(rname)
+				switch key {
+				case "repository":
+					nr.Repository = val
+				case "tag":
+					nr.Tag = val
+				case "arch":
+					nr.Arch = val
+				case "index_url":
+					nr.IndexURL = val
+					namedIndexURLSet[rname] = true
+				case "timeout_seconds":
+					n, err := strconv.Atoi(val)
+					if err != nil {
+						return fmt.Errorf("line %d: invalid timeout_seconds %q: %w", lineNum, val, err)
+					}
+					nr.TimeoutSeconds = n
+				case "verify_signature":
+					b, err := parseBool(val)
+					if err != nil {
+						return fmt.Errorf("line %d: invalid verify_signature %q", lineNum, val)
+					}
+					nr.VerifySignature = b
+				default:
+					return fmt.Errorf("line %d: unknown key %q in [%s]", lineNum, key, section)
+				}
+				continue
+			}
 			return fmt.Errorf("line %d: unknown section [%s]", lineNum, section)
 		}
 	}
@@ -336,6 +421,22 @@ func Parse(input string, cfg *Config) error {
 	}
 	if !indexURLSet && cfg.Repo.Repository != "" && cfg.Repo.Tag != "" {
 		cfg.Repo.IndexURL = fmt.Sprintf("https://github.com/%s/releases/download/%s/index.json", cfg.Repo.Repository, cfg.Repo.Tag)
+	}
+	if len(namedRepoOrder) > 0 {
+		cfg.Repos = make([]NamedRepo, 0, len(namedRepoOrder))
+		for _, rname := range namedRepoOrder {
+			nr := namedRepos[rname]
+			if nr.Arch == "" {
+				nr.Arch = cfg.Repo.Arch
+			}
+			if nr.TimeoutSeconds <= 0 {
+				nr.TimeoutSeconds = cfg.Repo.TimeoutSeconds
+			}
+			if !namedIndexURLSet[rname] && nr.Repository != "" && nr.Tag != "" {
+				nr.IndexURL = fmt.Sprintf("https://github.com/%s/releases/download/%s/index.json", nr.Repository, nr.Tag)
+			}
+			cfg.Repos = append(cfg.Repos, *nr)
+		}
 	}
 	return nil
 }
@@ -372,9 +473,62 @@ func (c Config) LocalIndexPath() string {
 	return filepath.Join(c.Paths.CacheDir, "index.json")
 }
 
+// RepoIndexPath returns the local cache path for a named repository's index.json.
+func (c Config) RepoIndexPath(repoName string) string {
+	if repoName == "" || repoName == "default" {
+		return c.LocalIndexPath()
+	}
+	return filepath.Join(c.Paths.CacheDir, "repos", repoName, "index.json")
+}
+
+// AllRepos returns the priority-ordered list of configured binary repositories.
+// When [repo.<name>] sections exist, those are returned; otherwise the single [repo] section is used.
+func (c Config) AllRepos() []NamedRepo {
+	if len(c.Repos) > 0 {
+		return c.Repos
+	}
+	return []NamedRepo{{
+		Name:            "default",
+		Repository:      c.Repo.Repository,
+		Tag:             c.Repo.Tag,
+		Arch:            c.Repo.Arch,
+		IndexURL:        c.Repo.IndexURL,
+		TimeoutSeconds:  c.Repo.TimeoutSeconds,
+		VerifySignature: c.Repo.VerifySignature,
+	}}
+}
+
+// EffectivePortsDirs returns all configured local ports tree directories in priority order.
+func (c Config) EffectivePortsDirs() []string {
+	if len(c.Paths.PortsDirs) > 0 {
+		return c.Paths.PortsDirs
+	}
+	if strings.TrimSpace(c.Paths.PortsDir) != "" {
+		return []string{c.Paths.PortsDir}
+	}
+	return nil
+}
+
 // BinaryCacheDir returns the local directory where downloaded binary archives are cached.
 func (c Config) BinaryCacheDir() string {
 	return filepath.Join(c.Paths.CacheDir, "bin")
+}
+
+func splitPathList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ':'
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func splitList(raw string) []string {
