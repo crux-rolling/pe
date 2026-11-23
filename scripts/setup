@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+# setup - Bootstrap a KryX Linux system into a mounted target rootfs from ANY
+# live Linux ISO (including CRUX ISO, Arch ISO, Debian/Fedora/Alpine live USB).
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+TARGET_ROOT="/mnt"
+PROFILE="base"
+EXTRA_PKGS=""
+REPO_SLUG="kryx-linux/ports"
+RELEASE_TAG="rolling-x86_64"
+ARCH="x86_64"
+HOSTNAME_VAL="kryx"
+TIMEZONE="UTC"
+KEY_SRC=""
+PE_BIN="$(command -v pe 2>/dev/null || echo /usr/bin/pe)"
+SETUP_REPO_BIN="$(command -v setup-repo 2>/dev/null || echo "${SCRIPT_DIR}/setup-repo")"
+SKIP_CONFIRM=0
+DRY_RUN=0
+
+usage() {
+    cat <<'EOF'
+Usage: setup [options]
+
+Bootstrap KryX Linux into a mounted target root (default: /mnt) using binary-first `pe`.
+Works from any live Linux ISO (CRUX ISO, Arch ISO, Alpine, Debian, Fedora).
+
+Options:
+  --root <dir>          Mounted target root filesystem (default: /mnt)
+  --profile <name>      Package profile: minimal, base, or devel (default: base)
+  --extra "<pkgs...>"   Extra space-separated binary packages to install
+  --repo <owner/repo>   Binary GitHub repository slug (default: kryx-linux/ports)
+  --tag <tag>           Binary release tag (default: rolling-x86_64)
+  --arch <arch>         Target architecture (default: x86_64)
+  --hostname <name>     System hostname (default: kryx)
+  --timezone <tz>       Timezone under /usr/share/zoneinfo (default: UTC)
+  --key <file|url>      Optional Ed25519 signing public key to trust
+  --pe-bin <path>       Path to static pe binary (default: auto-detected)
+  --dry-run             Show resolved plan without installing packages
+  -y, --yes             Non-interactive mode (skip confirmation prompt)
+  -h, --help            Show this help message
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --root)       TARGET_ROOT="$2"; shift 2 ;;
+        --profile)    PROFILE="$2"; shift 2 ;;
+        --extra)      EXTRA_PKGS="$2"; shift 2 ;;
+        --repo)       REPO_SLUG="$2"; shift 2 ;;
+        --tag)        RELEASE_TAG="$2"; shift 2 ;;
+        --arch)       ARCH="$2"; shift 2 ;;
+        --hostname)   HOSTNAME_VAL="$2"; shift 2 ;;
+        --timezone)   TIMEZONE="$2"; shift 2 ;;
+        --key)        KEY_SRC="$2"; shift 2 ;;
+        --pe-bin)     PE_BIN="$2"; shift 2 ;;
+        --dry-run)    DRY_RUN=1; shift ;;
+        -y|--yes)     SKIP_CONFIRM=1; shift ;;
+        -h|--help)    usage; exit 0 ;;
+        *)            echo "setup: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+case "$PROFILE" in
+    minimal)
+        PROFILE_PKGS=(filesystem glibc bash coreutils pe gports)
+        ;;
+    base)
+        PROFILE_PKGS=(filesystem glibc bash coreutils util-linux procps eudev kmod iproute2 dhcpcd shadow tar gzip xz zstd ca-certificates kernel pe gports)
+        ;;
+    devel)
+        PROFILE_PKGS=(filesystem glibc bash coreutils util-linux procps eudev kmod iproute2 dhcpcd shadow tar gzip xz zstd ca-certificates kernel gcc binutils make pkgconf patch diffutils findutils gawk sed grep curl git go pe gports)
+        ;;
+    *)
+        echo "setup: error: invalid --profile '${PROFILE}' (expected: minimal, base, or devel)" >&2
+        exit 2
+        ;;
+esac
+
+if [[ -n "$EXTRA_PKGS" ]]; then
+    read -r -a EXTRA_ARR <<< "$EXTRA_PKGS"
+    PROFILE_PKGS+=("${EXTRA_ARR[@]}")
+fi
+
+if [[ ! -d "$TARGET_ROOT" ]]; then
+    echo "setup: error: target root directory does not exist: ${TARGET_ROOT}" >&2
+    exit 1
+fi
+if [[ ! -x "$PE_BIN" ]]; then
+    echo "setup: error: static 'pe' binary not found at ${PE_BIN}" >&2
+    exit 1
+fi
+if [[ ! -x "$SETUP_REPO_BIN" ]]; then
+    echo "setup: error: 'setup-repo' script not found at ${SETUP_REPO_BIN}" >&2
+    exit 1
+fi
+
+echo "=== KryX Linux Installer (setup) ==="
+echo "  Target root: ${TARGET_ROOT}"
+echo "  Profile:     ${PROFILE}"
+echo "  Repository:  ${REPO_SLUG} (${RELEASE_TAG}, ${ARCH})"
+echo "  Hostname:    ${HOSTNAME_VAL}"
+echo "  Timezone:    ${TIMEZONE}"
+echo "  Packages:    ${PROFILE_PKGS[*]}"
+echo ""
+
+if [[ "$SKIP_CONFIRM" -eq 0 && "$DRY_RUN" -eq 0 ]]; then
+    read -r -p "Proceed with installation into ${TARGET_ROOT}? [y/N] " ans
+    case "$ans" in
+        y|Y|yes|YES) ;;
+        *) echo "Aborted."; exit 0 ;;
+    esac
+fi
+
+ROOT_PREFIX="${TARGET_ROOT%/}"
+
+# 1. Create FHS base directories in target rootfs.
+mkdir -p \
+    "${ROOT_PREFIX}/bin" \
+    "${ROOT_PREFIX}/boot" \
+    "${ROOT_PREFIX}/dev" \
+    "${ROOT_PREFIX}/etc/profile.d" \
+    "${ROOT_PREFIX}/home" \
+    "${ROOT_PREFIX}/lib" \
+    "${ROOT_PREFIX}/mnt" \
+    "${ROOT_PREFIX}/opt" \
+    "${ROOT_PREFIX}/proc" \
+    "${ROOT_PREFIX}/root" \
+    "${ROOT_PREFIX}/run" \
+    "${ROOT_PREFIX}/sbin" \
+    "${ROOT_PREFIX}/sys" \
+    "${ROOT_PREFIX}/tmp" \
+    "${ROOT_PREFIX}/usr/bin" \
+    "${ROOT_PREFIX}/usr/lib" \
+    "${ROOT_PREFIX}/usr/ports" \
+    "${ROOT_PREFIX}/usr/sbin" \
+    "${ROOT_PREFIX}/var/lib/pkg" \
+    "${ROOT_PREFIX}/var/log" \
+    "${ROOT_PREFIX}/var/tmp"
+chmod 1777 "${ROOT_PREFIX}/tmp" "${ROOT_PREFIX}/var/tmp"
+chmod 0750 "${ROOT_PREFIX}/root"
+
+# 2. Initialize target repo config & sync index.json via setup-repo.
+REPO_ARGS=(--root "$TARGET_ROOT" --repo "$REPO_SLUG" --tag "$RELEASE_TAG" --arch "$ARCH" --pe-bin "$PE_BIN")
+if [[ -n "$KEY_SRC" ]]; then
+    REPO_ARGS+=(--key "$KEY_SRC" --verify)
+fi
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    REPO_ARGS+=(--no-sync)
+fi
+"$SETUP_REPO_BIN" "${REPO_ARGS[@]}"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[setup] Dry-run complete. No packages were installed."
+    exit 0
+fi
+
+# 3. Build a temporary host-side pe.ini pointing into TARGET_ROOT.
+HOST_PE_INI="$(mktemp "${TMPDIR:-/tmp}/kryx-setup-pe.XXXXXX.ini")"
+trap 'rm -f "$HOST_PE_INI"' EXIT
+sed \
+    -e "s|^root = .*|root = ${TARGET_ROOT}|" \
+    -e "s|^ports_dir = .*|ports_dir = ${ROOT_PREFIX}/usr/ports|" \
+    -e "s|^cache_dir = .*|cache_dir = ${ROOT_PREFIX}/var/cache/pe|" \
+    -e "s|^source_cache = .*|source_cache = ${ROOT_PREFIX}/var/cache/pe/sources|" \
+    -e "s|^package_dir = .*|package_dir = ${ROOT_PREFIX}/var/cache/pe/packages|" \
+    -e "s|^work_dir = .*|work_dir = ${ROOT_PREFIX}/var/cache/pe/work|" \
+    -e "s|^keys_dir = .*|keys_dir = ${ROOT_PREFIX}/etc/pe/keys.d|" \
+    "${ROOT_PREFIX}/etc/pe.ini" > "$HOST_PE_INI"
+
+# 4. Partition requested profile packages into available binaries vs not-yet-published.
+AVAIL_INDEX="$("$PE_BIN" --config "$HOST_PE_INI" list --binaries | awk '{print $1}')"
+INSTALL_LIST=()
+MISSING_LIST=()
+for pkg in "${PROFILE_PKGS[@]}"; do
+    if grep -qx "$pkg" <<< "$AVAIL_INDEX"; then
+        INSTALL_LIST+=("$pkg")
+    else
+        MISSING_LIST+=("$pkg")
+    fi
+done
+
+if [[ "${#MISSING_LIST[@]}" -gt 0 ]]; then
+    echo "[setup] Note: the following profile package(s) are not yet published in ${RELEASE_TAG}:"
+    echo "        ${MISSING_LIST[*]}"
+    echo "        (Install them from CRUX ISO media or build them after chroot with 'pe build --deps --install <pkg>'.)"
+fi
+
+if [[ "${#INSTALL_LIST[@]}" -gt 0 ]]; then
+    echo "[setup] Installing ${#INSTALL_LIST[@]} binary package(s) into ${TARGET_ROOT}..."
+    "$PE_BIN" --config "$HOST_PE_INI" --root "$TARGET_ROOT" install --deps --reinstall "${INSTALL_LIST[@]}"
+fi
+
+# 5. Ensure pe, pe-index, kryx-src, gports, and setup tools are present inside target rootfs.
+for tool in pe pe-index kryx-src gports setup setup-kryx setup-chroot setup-repo; do
+    if [[ ! -x "${ROOT_PREFIX}/usr/bin/${tool}" ]]; then
+        src_bin="$(command -v "$tool" 2>/dev/null || echo "${SCRIPT_DIR}/${tool}")"
+        if [[ -x "$src_bin" ]]; then
+            install -m 0755 "$src_bin" "${ROOT_PREFIX}/usr/bin/${tool}"
+        fi
+    fi
+done
+
+# 6. Write baseline system identity & config files (without clobbering existing files).
+echo "$HOSTNAME_VAL" > "${ROOT_PREFIX}/etc/hostname"
+
+if [[ ! -f "${ROOT_PREFIX}/etc/hosts" ]]; then
+    cat > "${ROOT_PREFIX}/etc/hosts" <<EOF
+127.0.0.1	localhost ${HOSTNAME_VAL}
+::1		localhost ip6-localhost ip6-loopback
+EOF
+fi
+
+if [[ ! -f "${ROOT_PREFIX}/etc/os-release" ]]; then
+    cat > "${ROOT_PREFIX}/etc/os-release" <<'EOF'
+NAME="KryX Linux"
+ID=kryx
+ID_LIKE=crux
+PRETTY_NAME="KryX Linux (Rolling)"
+HOME_URL="https://github.com/kryx-linux"
+EOF
+fi
+
+if [[ -f "${ROOT_PREFIX}/usr/share/zoneinfo/${TIMEZONE}" ]]; then
+    ln -sf "/usr/share/zoneinfo/${TIMEZONE}" "${ROOT_PREFIX}/etc/localtime"
+fi
+
+if [[ ! -f "${ROOT_PREFIX}/etc/fstab" ]]; then
+    cat > "${ROOT_PREFIX}/etc/fstab" <<'EOF'
+# /etc/fstab - Update UUIDs/devices before rebooting!
+# <fs>                  <mount>   <type>   <options>         <dump> <pass>
+# UUID=<root-uuid>      /         ext4     defaults,noatime  0      1
+# UUID=<efi-uuid>       /boot/efi vfat     defaults          0      2
+tmpfs                   /tmp      tmpfs    defaults          0      0
+EOF
+fi
+
+echo ""
+echo "=== KryX Linux bootstrap complete! ==="
+echo "Next steps:"
+echo "  1. Enter the new system:  setup-chroot ${TARGET_ROOT}"
+echo "  2. Edit /etc/fstab with your disk UUIDs (run: blkid)"
+echo "  3. Set root password:     passwd"
+echo "  4. Install/configure your bootloader (GRUB / systemd-boot / limine)"
+echo "  5. Verify health:         pe doctor"
+echo "  6. Exit chroot & reboot!"

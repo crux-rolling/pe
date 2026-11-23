@@ -1,0 +1,101 @@
+.TH SETUP 8 "November 2026" "kryx-linux" "System Administration"
+.SH NAME
+setup \- scriptable KryX Linux rootfs bootstrapper
+.SH SYNOPSIS
+.B setup
+.RI [ options ]
+.SH DESCRIPTION
+.B setup
+bootstraps a KryX Linux installation into a mounted target root directory
+(default
+.IR /mnt )
+using the static
+.BR pe (8)
+binary.
+Because it has no TUI or distro\-specific dependencies, it runs cleanly from any
+x86_64 live Linux ISO (including CRUX, Arch, Debian, Fedora, and Alpine live
+environments).
+For an interactive
+.BR dialog (1)
+TUI installer (including hybrid offline CRUX ISO + online KryX overlay mode),
+see
+.BR setup\-kryx (8).
+.SH OPTIONS
+.TP
+.B \-\-root \fIdir\fR
+Mounted target root filesystem directory (default:
+.IR /mnt ).
+.TP
+.B \-\-profile \fIname\fR
+Package set to install:
+.BR minimal
+(barebones rootfs +
+.B pe
++
+.BR gports ),
+.BR base
+(bootable minimal system + kernel + networking; default), or
+.BR devel
+(base + C/C++/Go toolchain ready to build ports out of the box).
+.TP
+.B \-\-extra "\fIpkg1 pkg2 ...\fR"
+Additional space\-separated binary packages to install.
+.TP
+.B \-\-repo \fIowner/repo\fR
+GitHub repository slug hosting rolling binaries (default:
+.BR kryx-linux/ports ).
+.TP
+.B \-\-tag \fItag\fR
+Target binary release tag (default:
+.BR rolling\-x86_64 ).
+.TP
+.B \-\-arch \fIarch\fR
+Target architecture (default:
+.BR x86_64 ).
+.TP
+.B \-\-hostname \fIname\fR
+Hostname written to
+.I <root>/etc/hostname
+(default:
+.BR kryx ).
+.TP
+.B \-\-timezone \fItz\fR
+Timezone path under
+.I /usr/share/zoneinfo
+linked to
+.I <root>/etc/localtime
+(default:
+.BR UTC ).
+.TP
+.B \-\-key \fIfile|url\fR
+Optional Ed25519 public key trusted via
+.B pe key trust
+and enabling
+.B verify_signature = true
+in
+.IR pe.ini .
+.TP
+.B \-\-pe\-bin \fIpath\fR
+Explicit path to the static
+.B pe
+binary.
+.TP
+.B \-\-dry\-run
+Initialize config skeleton and print resolved plan without syncing or installing packages.
+.TP
+.BR \-y ", " \-\-yes
+Skip the interactive confirmation prompt (for automated scripts and ISO builders).
+.SH EXAMPLES
+.RS
+.PP
+.nf
+setup \-\-root /mnt \-\-profile base \-\-hostname mykryx \-\-timezone UTC
+setup \-\-root /mnt \-\-profile devel \-\-extra "vim tmux" \-\-yes
+.fi
+.RE
+.SH SEE ALSO
+.BR setup\-kryx (8),
+.BR setup\-chroot (8),
+.BR setup\-repo (8),
+.BR pe (8),
+.BR gports (8)

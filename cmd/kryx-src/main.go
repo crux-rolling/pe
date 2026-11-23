@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/kryx-linux/pe/internal/cli"
+	"github.com/kryx-linux/pe/internal/signing"
 	"github.com/kryx-linux/pe/internal/srcmachine"
 )
 
@@ -55,6 +58,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "sign":
+		if err := cmdSign(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "kryx-src: %v\n", err)
+			return 1
+		}
+		return 0
+	case "plan":
+		if err := cmdPlan(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "kryx-src: %v\n", err)
+			return 1
+		}
+		return 0
 	case "rewrite-urls":
 		if err := cmdRewriteURLs(args[1:], stdout, stderr); err != nil {
 			fmt.Fprintf(stderr, "kryx-src: %v\n", err)
@@ -75,9 +90,11 @@ Unified xbps-src-style source build, linting, and release-staging machine for Kr
 
 Commands:
   pkg, build       Resolve targets/deps via canonical registry and build .pkg.tar.<ext> archives
+  plan             Generate topological GitHub Actions matrix JSON (--max-ports, --chunk-size)
   lint, check      Validate Pkgfiles, dir/name alignment, duplicate names, deps, and cycles
   list, ls         List discovered ports (relative path, Pkgfile name, version)
   stage, index     Generate/update index.json and optional GitHub-safe release upload assets
+  sign             Sign index.json with an Ed25519 private key (-> index.json.sig)
   rewrite-urls     Rewrite index.json URLs from GitHub release assets JSON and verify built archives
   version          Print version and exit
   help             Show this help message
@@ -91,6 +108,7 @@ func cmdPkg(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 
 	portsDir := fs.String("ports", "/usr/ports", "ports tree directory or single-port repo root")
+	fromGit := fs.String("from-git", "", "clone and build a Nix-like source repo directly (<url>[@ref])")
 	collections := fs.String("collections", "", "comma-separated collection priority order (empty = auto-discover)")
 	repoHint := fs.String("port-repo", "", "optional source repo slug hint (e.g. kryx-linux/kernel)")
 	workRoot := fs.String("work-root", "", "isolated build work root (contains cache/sources/work/packages)")
@@ -122,12 +140,42 @@ func cmdPkg(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	targets := fs.Args()
+	effectivePorts := *portsDir
+	if strings.TrimSpace(*fromGit) != "" {
+		repoURL := strings.TrimSpace(*fromGit)
+		ref := ""
+		if at := strings.LastIndex(repoURL, "@"); at > strings.Index(repoURL, "://")+3 {
+			ref = repoURL[at+1:]
+			repoURL = repoURL[:at]
+		}
+		cloneBase := *workRoot
+		if cloneBase == "" {
+			cloneBase = os.TempDir()
+		}
+		cloneDir := filepath.Join(cloneBase, "from-git-src")
+		_ = os.RemoveAll(cloneDir)
+		cloneArgs := []string{"clone", "--depth=1"}
+		if ref != "" {
+			cloneArgs = append(cloneArgs, "--branch", ref)
+		}
+		cloneArgs = append(cloneArgs, repoURL, cloneDir)
+		cmd := exec.Command("git", cloneArgs...)
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("clone --from-git %s: %w", *fromGit, err)
+		}
+		effectivePorts = cloneDir
+		if len(targets) == 0 {
+			targets = []string{"."}
+		}
+	}
 	if len(targets) == 0 {
 		return fmt.Errorf("usage: kryx-src pkg [options] <port|collection|all...>")
 	}
 
 	res, err := srcmachine.Build(srcmachine.BuildOptions{
-		PortsDir:        *portsDir,
+		PortsDir:        effectivePorts,
 		Collections:     splitCSV(*collections),
 		Targets:         targets,
 		RepoHint:        *repoHint,
@@ -320,6 +368,61 @@ func cmdRewriteURLs(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "Verified and updated download URLs in %s\n", *indexPath)
 	return nil
+}
+
+func cmdSign(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("sign", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	keyPath := fs.String("key", "", "path to kryx-ed25519 private key file")
+	filePath := fs.String("file", "index.json", "file to sign (e.g. index.json)")
+	outSig := fs.String("out", "", "output signature path (default: <file>.sig)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*keyPath) == "" {
+		return fmt.Errorf("--key is required")
+	}
+	sigPath := *outSig
+	if sigPath == "" {
+		sigPath = *filePath + ".sig"
+	}
+	keyID, err := signing.SignFile(*keyPath, *filePath, sigPath)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Signed %s -> %s (key-id %s)\n", *filePath, sigPath, keyID)
+	return nil
+}
+
+func cmdPlan(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	portsDir := fs.String("ports", "/usr/ports", "ports tree directory or single-port repo root")
+	collections := fs.String("collections", "", "comma-separated collection list")
+	repoHint := fs.String("port-repo", "", "optional source repo slug hint")
+	maxPorts := fs.Int("max-ports", 20, "maximum number of ports to include per workflow run")
+	chunkSize := fs.Int("chunk-size", 1, "number of ports per matrix job")
+	compact := fs.Bool("compact", false, "emit single-line JSON suitable for GITHUB_OUTPUT")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	targets := fs.Args()
+	if len(targets) == 0 {
+		return fmt.Errorf("usage: kryx-src plan [options] <port|collection|all...>")
+	}
+	reg, err := srcmachine.LoadRegistry(*portsDir, splitCSV(*collections))
+	if err != nil {
+		return err
+	}
+	plan, err := srcmachine.BuildMatrixPlan(reg, targets, *repoHint, *maxPorts, *chunkSize)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(stdout)
+	if !*compact {
+		enc.SetIndent("", "  ")
+	}
+	return enc.Encode(plan)
 }
 
 func splitCSV(raw string) []string {

@@ -342,3 +342,31 @@ build() {
 		t.Fatalf("expected MakeDepends=[codegen], got %v", entry.MakeDepends)
 	}
 }
+
+func TestMatrixPlanWaveOrderingAndCap(t *testing.T) {
+	portsDir := t.TempDir()
+	writePort := func(rel, body string) {
+		dir := filepath.Join(portsDir, filepath.FromSlash(rel))
+		_ = os.MkdirAll(dir, 0o755)
+		_ = os.WriteFile(filepath.Join(dir, "Pkgfile"), []byte(body), 0o644)
+	}
+	writePort("core/base", "name=base\nversion=1.0\nrelease=1\nbuild() { true; }\n")
+	writePort("opt/mid", "# Depends on: base\nname=mid\nversion=1.0\nrelease=1\nbuild() { true; }\n")
+	writePort("rolling/top", "# Make depends on: mid\nname=top\nversion=1.0\nrelease=1\nbuild() { true; }\n")
+
+	reg, err := LoadRegistry(portsDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := BuildMatrixPlan(reg, []string{"all"}, "", 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.TotalPorts != 3 || !plan.Truncated || len(plan.Include) != 2 {
+		t.Fatalf("unexpected capped matrix plan: %+v", plan)
+	}
+	if plan.Include[0].Ports[0] != "core/base" || plan.Include[0].Wave != 0 ||
+		plan.Include[1].Ports[0] != "opt/mid" || plan.Include[1].Wave != 1 {
+		t.Fatalf("unexpected topological waves: %+v", plan.Include)
+	}
+}

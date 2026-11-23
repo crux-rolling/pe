@@ -38,9 +38,42 @@ func TestParseINIAndExample(t *testing.T) {
 	if cfg.Build.Compression != "zst" {
 		t.Fatalf("expected compression=zst, got %q", cfg.Build.Compression)
 	}
-	wantCols := []string{"core", "opt", "xorg", "contrib"}
+	wantCols := []string{"rolling", "core", "opt", "xorg", "contrib"}
 	if !reflect.DeepEqual(cfg.Paths.Collections, wantCols) {
 		t.Fatalf("collections = %v, want %v", cfg.Paths.Collections, wantCols)
+	}
+}
+
+func TestMultiRepoAndMultiPortsConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pe.ini")
+	content := `
+[paths]
+ports_dir = /usr/ports, /srv/local-ports
+keys_dir = /etc/pe/keys.d
+
+[repo.rolling]
+repository = kryx-linux/ports
+tag = rolling-x86_64
+verify_signature = true
+
+[repo.extra]
+index_url = https://example.org/extra/index.json
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, true)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	wantDirs := []string{"/usr/ports", "/srv/local-ports"}
+	if !reflect.DeepEqual(cfg.EffectivePortsDirs(), wantDirs) {
+		t.Fatalf("EffectivePortsDirs = %v, want %v", cfg.EffectivePortsDirs(), wantDirs)
+	}
+	repos := cfg.AllRepos()
+	if len(repos) != 2 || repos[0].Name != "rolling" || !repos[0].VerifySignature || repos[1].Name != "extra" {
+		t.Fatalf("unexpected AllRepos: %+v", repos)
 	}
 }
 

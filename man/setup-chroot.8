@@ -1,0 +1,52 @@
+.TH SETUP\-CHROOT 8 "November 2026" "kryx-linux" "System Administration"
+.SH NAME
+setup\-chroot \- safely mount API filesystems and chroot into a KryX/CRUX root
+.SH SYNOPSIS
+.B setup\-chroot
+.RI [ target_root ]
+.RI [ command " [" args ...\& ]]
+.SH DESCRIPTION
+.B setup\-chroot
+prepares a mounted KryX or CRUX target root filesystem for chroot administration
+by bind\-mounting
+.IR /dev ,
+.IR /dev/pts ,
+.IR /proc ,
+.IR /sys ,
+.IR /run ,
+and (when present on the host)
+.IR /sys/firmware/efi/efivars ,
+copying host
+.I /etc/resolv.conf
+(dereferencing symlinks) for working DNS inside the chroot, and launching a
+clean chroot environment.
+.PP
+When called with no arguments,
+.I target_root
+defaults to
+.I /mnt
+and
+.I command
+defaults to
+.B /bin/bash \-l
+(matching stock CRUX
+.BR setup\-chroot ).
+Upon exit or interruption
+.RB ( SIGINT / SIGTERM ),
+all mounts created by
+.B setup\-chroot
+are unmounted automatically in reverse order.
+.SH EXAMPLES
+.RS
+.PP
+.nf
+setup\-chroot
+setup\-chroot /mnt
+setup\-chroot /mnt /bin/bash \-c "pe doctor && pe sync"
+.fi
+.RE
+.SH SEE ALSO
+.BR setup (8),
+.BR setup\-kryx (8),
+.BR setup\-repo (8),
+.BR chroot (8)

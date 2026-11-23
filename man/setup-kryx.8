@@ -1,0 +1,82 @@
+.TH SETUP\-KRYX 8 "November 2026" "kryx-linux" "System Administration"
+.SH NAME
+setup\-kryx \- interactive TUI installer for KryX Linux
+.SH SYNOPSIS
+.B setup\-kryx
+.RI [ options ]
+.SH DESCRIPTION
+.B setup\-kryx
+is the interactive
+.BR dialog (1)
+TUI installer for KryX Linux (automatically falling back to a plain\-terminal
+menu when
+.B dialog
+is unavailable).
+It guides the user through choosing a target mountpoint, installation mode,
+package profile
+.RB ( minimal ,
+.BR base ,
+or
+.BR devel ),
+extra packages, hostname, timezone, and optional Ed25519 release signing key,
+then delegates installation to
+.BR setup (8)
+and offers to enter the new system via
+.BR setup\-chroot (8).
+.PP
+Two installation modes are supported:
+.TP
+.B online
+Install KryX packages directly from the remote
+.BR pe (8)
+binary repository
+.RB ( kryx-linux/ports
+.BR rolling\-x86_64 ).
+.TP
+.B hybrid
+Install offline CRUX
+.I core/
+packages from mounted CRUX ISO media
+.RI ( /media/crux/core )
+via static
+.B pe \-\-root
+and overlay KryX binary packages and configuration on top.
+.SH OPTIONS
+.TP
+.B \-\-plain
+Force plain\-terminal interactive prompts instead of
+.BR dialog (1).
+.TP
+.B \-\-root \fIdir\fR
+Pre\-fill target root mountpoint (default:
+.IR /mnt ).
+.TP
+.B \-\-iso\-dir \fIdir\fR
+Pre\-fill CRUX ISO media directory for hybrid mode (default:
+.IR /media/crux ).
+.TP
+.B \-\-repo \fIowner/repo\fR
+Pre\-fill binary repository slug (default:
+.BR kryx-linux/ports ).
+.TP
+.B \-\-tag \fItag\fR
+Pre\-fill binary release tag (default:
+.BR rolling\-x86_64 ).
+.TP
+.B \-\-pe\-bin \fIpath\fR
+Explicit path to the static
+.B pe
+binary.
+.SH EXAMPLES
+.RS
+.PP
+.nf
+setup\-kryx
+setup\-kryx \-\-root /mnt \-\-plain
+.fi
+.RE
+.SH SEE ALSO
+.BR setup (8),
+.BR setup\-chroot (8),
+.BR setup\-repo (8),
+.BR pe (8)
