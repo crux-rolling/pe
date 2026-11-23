@@ -1,4 +1,4 @@
-# pe
+# `PE` (Pkgfile Engine)
 
 `pe` is a standalone Go package manager for standard CRUX Linux installations. It adapts CRUX's `pkgutils` package database, locking, `/etc/pkgadd.conf` policy, and `Pkgfile`/`pkgmk` build conventions into a single binary-first CLI.
 
