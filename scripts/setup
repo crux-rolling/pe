@@ -193,7 +193,7 @@ if [[ "${#INSTALL_LIST[@]}" -gt 0 ]]; then
 fi
 
 # 5. Ensure pe, pe-index, kryx-src, gports, and setup tools are present inside target rootfs.
-for tool in pe pe-index kryx-src gports setup setup-chroot setup-repo; do
+for tool in pe pe-index kryx-src gports setup setup-kryx setup-chroot setup-repo; do
     if [[ ! -x "${ROOT_PREFIX}/usr/bin/${tool}" ]]; then
         src_bin="$(command -v "$tool" 2>/dev/null || echo "${SCRIPT_DIR}/${tool}")"
         if [[ -x "$src_bin" ]]; then

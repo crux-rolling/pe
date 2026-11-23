@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# setup-kryx - Interactive TUI installer for KryX Linux (dialog + plain-terminal fallback).
+# Supports Online KryX binary repo (pe) and Hybrid CRUX ISO (/media/crux) + KryX overlay.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VERSION="rolling"
+
+SETUP_BIN="$(command -v setup 2>/dev/null || echo "${SCRIPT_DIR}/setup")"
+SETUP_REPO_BIN="$(command -v setup-repo 2>/dev/null || echo "${SCRIPT_DIR}/setup-repo")"
+SETUP_CHROOT_BIN="$(command -v setup-chroot 2>/dev/null || echo "${SCRIPT_DIR}/setup-chroot")"
+PE_BIN="$(command -v pe 2>/dev/null || echo /usr/bin/pe)"
+
+TARGET_ROOT="/mnt"
+MODE="online"
+ISO_DIR="/media/crux"
+PROFILE="base"
+EXTRA_PKGS=""
+REPO_SLUG="kryx-linux/ports"
+RELEASE_TAG="rolling-x86_64"
+HOSTNAME_VAL="kryx"
+TIMEZONE="UTC"
+KEY_SRC=""
+FORCE_PLAIN=0
+
+usage() {
+    cat <<'EOF'
+Usage: setup-kryx [options]
+
+Interactive TUI installer for KryX Linux (uses `dialog` when available, with an
+automatic plain-terminal menu fallback on live ISOs without `dialog`).
+
+Options:
+  --plain               Force plain-terminal interactive prompts instead of dialog
+  --root <dir>          Pre-fill target root mountpoint (default: /mnt)
+  --iso-dir <dir>       Pre-fill CRUX ISO media directory (default: /media/crux)
+  --repo <owner/repo>   Pre-fill binary repository slug (default: kryx-linux/ports)
+  --tag <tag>           Pre-fill release tag (default: rolling-x86_64)
+  --pe-bin <path>       Path to static pe binary (default: auto-detected)
+  -h, --help            Show this help message
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --plain)    FORCE_PLAIN=1; shift ;;
+        --root)     TARGET_ROOT="$2"; shift 2 ;;
+        --iso-dir)  ISO_DIR="$2"; shift 2 ;;
+        --repo)     REPO_SLUG="$2"; shift 2 ;;
+        --tag)      RELEASE_TAG="$2"; shift 2 ;;
+        --pe-bin)   PE_BIN="$2"; shift 2 ;;
+        -h|--help)  usage; exit 0 ;;
+        *)          echo "setup-kryx: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+USE_DIALOG=0
+if [[ "$FORCE_PLAIN" -eq 0 ]] && command -v dialog >/dev/null 2>&1 && [[ -t 0 && -t 1 ]]; then
+    USE_DIALOG=1
+fi
+
+TMP_OUT="$(mktemp "${TMPDIR:-/tmp}/setup-kryx.XXXXXX")"
+trap 'rm -f "$TMP_OUT"' EXIT
+
+# --- UI abstraction (dialog TUI with plain-text fallback) ---
+
+ui_msg() {
+    local title="$1" msg="$2"
+    if [[ "$USE_DIALOG" -eq 1 ]]; then
+        dialog --backtitle "KryX Linux ($VERSION) Setup" --no-shadow --title "$title" --msgbox "$msg" 12 66
+    else
+        echo ""
+        echo "=== $title ==="
+        printf '%b\n' "$msg"
+    fi
+}
+
+ui_yesno() {
+    local title="$1" msg="$2" default_no="${3:-0}"
+    if [[ "$USE_DIALOG" -eq 1 ]]; then
+        local extra=()
+        [[ "$default_no" -eq 1 ]] && extra=(--defaultno)
+        dialog --backtitle "KryX Linux ($VERSION) Setup" --no-shadow --title "$title" "${extra[@]}" --yesno "$msg" 12 66
+        return $?
+    else
+        echo ""
+        echo "=== $title ==="
+        printf '%b\n' "$msg"
+        local prompt="[Y/n]"
+        [[ "$default_no" -eq 1 ]] && prompt="[y/N]"
+        read -r -p "Continue? ${prompt} " ans
+        if [[ -z "$ans" ]]; then
+            [[ "$default_no" -eq 0 ]] && return 0 || return 1
+        fi
+        case "$ans" in
+            y|Y|yes|YES) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+}
+
+ui_input() {
+    local title="$1" msg="$2" def="$3"
+    if [[ "$USE_DIALOG" -eq 1 ]]; then
+        dialog --backtitle "KryX Linux ($VERSION) Setup" --no-shadow --title "$title" --inputbox "$msg" 10 66 "$def" 2>"$TMP_OUT" || return 1
+        cat "$TMP_OUT"
+    else
+        echo ""
+        echo "=== $title ==="
+        printf '%b\n' "$msg"
+        local val=""
+        read -r -p "[${def}]: " val
+        echo "${val:-$def}"
+    fi
+}
+
+ui_menu() {
+    local title="$1" msg="$2"
+    shift 2
+    if [[ "$USE_DIALOG" -eq 1 ]]; then
+        dialog --backtitle "KryX Linux ($VERSION) Setup" --no-shadow --title "$title" --menu "$msg" 15 68 6 "$@" 2>"$TMP_OUT" || return 1
+        cat "$TMP_OUT"
+    else
+        echo ""
+        echo "=== $title ==="
+        printf '%b\n' "$msg"
+        local keys=()
+        local idx=1
+        while [[ $# -ge 2 ]]; do
+            keys+=("$1")
+            printf '  %d) %-12s - %s\n' "$idx" "$1" "$2"
+            shift 2
+            idx=$((idx + 1))
+        done
+        local choice=""
+        read -r -p "Select [1]: " choice
+        choice="${choice:-1}"
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#keys[@]} )); then
+            echo "${keys[$((choice - 1))]}"
+        else
+            echo "$choice"
+        fi
+    fi
+}
+
+# --- Installer Flow ---
+
+if ! ui_yesno "Welcome to KryX Linux" \
+"Welcome to the KryX Linux interactive installer.\n\nBefore continuing, ensure your target root partition is formatted and mounted (for example at /mnt).\n\nKryX stays minimal out of the box while giving you turnkey binary installs (pe) and source builds (kryx-src/gports).\n\nProceed with setup?"; then
+    echo "Installation aborted."
+    exit 0
+fi
+
+# 1. Target root directory
+while true; do
+    TARGET_ROOT="$(ui_input "Target Root Directory" "Enter the directory where your KryX root partition is mounted:" "$TARGET_ROOT")" || { echo "Aborted."; exit 1; }
+    if [[ -d "$TARGET_ROOT" && "$TARGET_ROOT" != "/" ]]; then
+        break
+    fi
+    ui_msg "Invalid Root" "Directory '${TARGET_ROOT}' does not exist or is '/'. Mount your target partition (e.g. /mnt) and try again."
+done
+
+# 2. Installation mode (Online pe vs Hybrid CRUX ISO + KryX overlay)
+MODE="$(ui_menu "Installation Source" "Choose how to install base packages into ${TARGET_ROOT}:" \
+    "online" "Online KryX binary repo (${REPO_SLUG} ${RELEASE_TAG})" \
+    "hybrid" "Hybrid: Offline CRUX ISO (/media/crux) + Online KryX pe overlay")" || { echo "Aborted."; exit 1; }
+
+if [[ "$MODE" == "hybrid" ]]; then
+    ISO_DIR="$(ui_input "CRUX ISO Package Directory" "Enter path to mounted CRUX media containing core/ (e.g. /media/crux):" "$ISO_DIR")" || { echo "Aborted."; exit 1; }
+fi
+
+# 3. Profile selection
+PROFILE="$(ui_menu "Package Profile" "Select a KryX Linux package profile:" \
+    "minimal" "Barebones rootfs + pe + gports (smallest footprint)" \
+    "base"    "Bootable minimal system + kernel + networking (Recommended)" \
+    "devel"   "Base + full C/C++/Go toolchain ready for pe build / kryx-src")" || { echo "Aborted."; exit 1; }
+
+# 4. Repository, hostname, timezone, extra packages
+REPO_SLUG="$(ui_input "Binary Repository" "GitHub repository slug hosting rolling binaries:" "$REPO_SLUG")" || { echo "Aborted."; exit 1; }
+RELEASE_TAG="$(ui_input "Release Tag" "Target release tag for binaries:" "$RELEASE_TAG")" || { echo "Aborted."; exit 1; }
+EXTRA_PKGS="$(ui_input "Extra Packages (Optional)" "Space-separated extra packages to install (leave blank for none):" "$EXTRA_PKGS")" || { echo "Aborted."; exit 1; }
+HOSTNAME_VAL="$(ui_input "Hostname" "Enter the hostname for the new KryX system:" "$HOSTNAME_VAL")" || { echo "Aborted."; exit 1; }
+TIMEZONE="$(ui_input "Timezone" "Enter timezone under /usr/share/zoneinfo (e.g. UTC, Asia/Dhaka):" "$TIMEZONE")" || { echo "Aborted."; exit 1; }
+KEY_SRC="$(ui_input "Release Signing Key (Optional)" "Path or HTTPS URL to Ed25519 .pub key to trust (leave blank to skip):" "$KEY_SRC")" || { echo "Aborted."; exit 1; }
+
+# 5. Summary & confirmation
+SUMMARY="Target root: ${TARGET_ROOT}\nMode:        ${MODE}"
+if [[ "$MODE" == "hybrid" ]]; then
+    SUMMARY="${SUMMARY}\nISO media:   ${ISO_DIR}"
+fi
+SUMMARY="${SUMMARY}\nProfile:     ${PROFILE}\nRepository:  ${REPO_SLUG} (${RELEASE_TAG})\nExtra pkgs:  ${EXTRA_PKGS:-<none>}\nHostname:    ${HOSTNAME_VAL}\nTimezone:    ${TIMEZONE}\nSigning key: ${KEY_SRC:-<none>}\n\nStart installation now?"
+
+if ! ui_yesno "Confirm Installation" "$SUMMARY" 0; then
+    echo "Installation aborted."
+    exit 0
+fi
+
+clear 2>/dev/null || true
+
+# 6. Hybrid mode: install offline CRUX core archives first via static `pe --root`
+if [[ "$MODE" == "hybrid" ]]; then
+    if [[ ! -d "${ISO_DIR}/core" ]]; then
+        echo "setup-kryx: error: ${ISO_DIR}/core not found" >&2
+        exit 1
+    fi
+    echo "=== [1/2] Installing offline CRUX core archives from ${ISO_DIR}/core ==="
+    mkdir -p "${TARGET_ROOT%/}/var/lib/pkg"
+    shopt -s nullglob
+    ISO_PKGS=("${ISO_DIR}/core/"*.pkg.tar.*)
+    if [[ "${#ISO_PKGS[@]}" -eq 0 ]]; then
+        echo "setup-kryx: error: no .pkg.tar.* archives found in ${ISO_DIR}/core" >&2
+        exit 1
+    fi
+    "$PE_BIN" --root "$TARGET_ROOT" install --reinstall --force "${ISO_PKGS[@]}"
+fi
+
+# 7. Run unified KryX `setup` for repo config, online overlay packages, and baseline /etc files
+echo "=== Configuring KryX Linux via setup ==="
+SETUP_ARGS=(
+    --root "$TARGET_ROOT"
+    --profile "$PROFILE"
+    --repo "$REPO_SLUG"
+    --tag "$RELEASE_TAG"
+    --hostname "$HOSTNAME_VAL"
+    --timezone "$TIMEZONE"
+    --pe-bin "$PE_BIN"
+    --yes
+)
+[[ -n "$EXTRA_PKGS" ]] && SETUP_ARGS+=(--extra "$EXTRA_PKGS")
+[[ -n "$KEY_SRC" ]] && SETUP_ARGS+=(--key "$KEY_SRC")
+
+"$SETUP_BIN" "${SETUP_ARGS[@]}"
+
+# 8. Optional immediate chroot
+if ui_yesno "Installation Complete" \
+"KryX Linux has been bootstrapped into ${TARGET_ROOT}!\n\nWould you like to enter chroot now via setup-chroot ${TARGET_ROOT} to edit /etc/fstab, set root password (passwd), and install your bootloader?" 0; then
+    exec "$SETUP_CHROOT_BIN" "$TARGET_ROOT"
+fi

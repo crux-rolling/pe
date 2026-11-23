@@ -5,15 +5,15 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: setup-chroot <target_root> [command [args...]]
+Usage: setup-chroot [target_root] [command [args...]]
 
 Bind-mounts /dev, /dev/pts, /proc, /sys, /run (and efivarfs if present),
-copies /etc/resolv.conf, enters chroot (default: /bin/bash -l), and cleanly
-unmounts everything upon exit.
+copies /etc/resolv.conf, enters chroot (default target: /mnt; default command:
+/bin/bash -l), and cleanly unmounts everything upon exit.
 EOF
 }
 
-if [[ $# -lt 1 ]] || [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
     usage
     exit 0
 fi
@@ -23,8 +23,11 @@ if [[ "$(id -u)" -ne 0 ]]; then
     exit 1
 fi
 
-TARGET_ROOT="$1"
-shift
+TARGET_ROOT="/mnt"
+if [[ $# -ge 1 ]]; then
+    TARGET_ROOT="$1"
+    shift
+fi
 
 if [[ ! -d "$TARGET_ROOT" ]]; then
     echo "setup-chroot: error: target root directory does not exist: ${TARGET_ROOT}" >&2
