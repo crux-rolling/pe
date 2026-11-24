@@ -360,3 +360,42 @@ func TestBoundedWorkerPoolConcurrency(t *testing.T) {
 		t.Fatalf("worker pool exceeded bound: max concurrent = %d, want <= 2", peak)
 	}
 }
+
+func TestLinkNestedCollectionsAndCountPorts(t *testing.T) {
+	portsDir := t.TempDir()
+	kryxDir := filepath.Join(portsDir, "kryx")
+	for _, rel := range []string{
+		"pkg-tools/kpm/Pkgfile",
+		"pkg-tools/zig/Pkgfile",
+		"kernel/linux6.18/Pkgfile",
+		"docs/README.md",
+	} {
+		p := filepath.Join(kryxDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("name=test\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := countPorts(kryxDir); got != 3 {
+		t.Fatalf("countPorts(kryxDir) = %d, want 3", got)
+	}
+
+	linkNestedCollections(kryxDir)
+
+	for _, sub := range []string{"pkg-tools", "kernel"} {
+		target, err := os.Readlink(filepath.Join(portsDir, sub))
+		if err != nil {
+			t.Fatalf("expected symlink %s: %v", sub, err)
+		}
+		want := filepath.Join("kryx", sub)
+		if target != want {
+			t.Fatalf("symlink %s -> %q, want %q", sub, target, want)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(portsDir, "docs")); !os.IsNotExist(err) {
+		t.Fatalf("non-collection directory 'docs' should not be symlinked")
+	}
+}

@@ -3,7 +3,7 @@
 # Protocols (all pure-Go, zero external binaries): git, httpup, rsync, tarball
 # Place custom or third-party collections in /etc/ports/sources.list.d/*.list
 
-git rolling https://github.com/kryx-linux/ports.git /usr/ports/rolling-repo
+git kryx    https://github.com/kryx-linux/ports.git
 git core    https://github.com/kryx-linux/core.git
 git opt     https://github.com/kryx-linux/opt.git
 git xorg    https://github.com/kryx-linux/xorg.git

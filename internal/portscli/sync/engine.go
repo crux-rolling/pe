@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	stdsync "sync"
 	"time"
 
@@ -151,6 +152,10 @@ func (e *Engine) syncOne(ctx context.Context, src sources.Source) Result {
 		err = fmt.Errorf("unsupported protocol %q", src.Protocol)
 	}
 
+	if err == nil {
+		linkNestedCollections(src.DestDir)
+	}
+
 	elapsed := time.Since(start)
 	res := Result{
 		Source:  src,
@@ -233,13 +238,32 @@ func InspectCollection(_ context.Context, src sources.Source) CollectionState {
 }
 
 func countPorts(dir string) int {
+	if n := countDirectPorts(dir); n > 0 {
+		return n
+	}
+	// Multi-collection repo layout (e.g. kryx-linux/ports containing pkg-tools/ & kernel/).
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	total := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		total += countDirectPorts(filepath.Join(dir, entry.Name()))
+	}
+	return total
+}
+
+func countDirectPorts(dir string) int {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0
 	}
 	count := 0
 	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == ".git" {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(dir, entry.Name(), "Pkgfile")); err == nil {
@@ -247,4 +271,45 @@ func countPorts(dir string) int {
 		}
 	}
 	return count
+}
+
+// linkNestedCollections exposes nested collection directories inside a multi-collection
+// repository (such as /usr/ports/kryx/{pkg-tools,kernel}) as relative symlinks in the
+// parent ports directory (/usr/ports/pkg-tools -> kryx/pkg-tools) when safe to do so.
+func linkNestedCollections(destDir string) {
+	if countDirectPorts(destDir) > 0 {
+		return
+	}
+	parentDir := filepath.Dir(filepath.Clean(destDir))
+	baseName := filepath.Base(filepath.Clean(destDir))
+	if parentDir == "" || parentDir == "." || baseName == "" || baseName == "." {
+		return
+	}
+	entries, err := os.ReadDir(destDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		subName := entry.Name()
+		if countDirectPorts(filepath.Join(destDir, subName)) == 0 {
+			continue
+		}
+		linkPath := filepath.Join(parentDir, subName)
+		wantTarget := filepath.Join(baseName, subName)
+		if fi, err := os.Lstat(linkPath); err == nil {
+			// Only update existing symlinks that already point inside baseName/.
+			if fi.Mode()&os.ModeSymlink == 0 {
+				continue
+			}
+			curTarget, rerr := os.Readlink(linkPath)
+			if rerr != nil || curTarget == wantTarget || !strings.HasPrefix(curTarget, baseName+string(filepath.Separator)) {
+				continue
+			}
+			_ = os.Remove(linkPath)
+		}
+		_ = os.Symlink(wantTarget, linkPath)
+	}
 }

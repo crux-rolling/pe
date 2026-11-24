@@ -26,7 +26,7 @@ func TestLoadDefaultTemplate(t *testing.T) {
 		url   string
 		dest  string
 	}{
-		{ProtoGit, "rolling", "https://github.com/kryx-linux/ports.git", "/usr/ports/rolling-repo"},
+		{ProtoGit, "kryx", "https://github.com/kryx-linux/ports.git", "/usr/ports/kryx"},
 		{ProtoGit, "core", "https://github.com/kryx-linux/core.git", "/usr/ports/core"},
 		{ProtoGit, "opt", "https://github.com/kryx-linux/opt.git", "/usr/ports/opt"},
 		{ProtoGit, "xorg", "https://github.com/kryx-linux/xorg.git", "/usr/ports/xorg"},

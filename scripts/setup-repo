@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-repo - Initialize KryX Linux kpm/gports repositories and keyring on host or target root.
+# setup-repo - Initialize KryX Linux kpm/ports repositories and keyring on host or target root.
 # Works from any live Linux ISO (CRUX, Arch, Debian, Fedora, Alpine) with static `kpm`.
 set -euo pipefail
 
@@ -19,7 +19,7 @@ usage() {
     cat <<'EOF'
 Usage: setup-repo [options]
 
-Initialize /etc/kpm.ini, /etc/gports/sources.list, /etc/kpm/keys.d, and /var/lib/pkg/db
+Initialize /etc/kpm.ini, /etc/ports/sources.list, /etc/kpm/keys.d, and /var/lib/pkg/db
 for KryX Linux (either on the running system or inside a target --root /mnt).
 
 Options:
@@ -31,7 +31,7 @@ Options:
   --ports-dir <dir>   Local ports directory inside root (default: /usr/ports)
   --key <file|url>    Trust an Ed25519 release signing public key in keys.d
   --verify            Enable verify_signature = true in kpm.ini
-  --sync-ports        Also sync /usr/ports using gports if installed
+  --sync-ports        Also sync /usr/ports using ports (kpm ports) if installed
   --no-sync           Write configs without contacting the network
   --kpm-bin <path>     Path to kpm binary (default: auto-detected)
   -h, --help          Show this help message
@@ -64,7 +64,7 @@ fi
 echo "[setup-repo] Initializing KryX repository layout under ${TARGET_ROOT}..."
 mkdir -p \
     "${ROOT_PREFIX}/etc/kpm/keys.d" \
-    "${ROOT_PREFIX}/etc/gports/sources.list.d" \
+    "${ROOT_PREFIX}/etc/ports/sources.list.d" \
     "${ROOT_PREFIX}/var/lib/pkg" \
     "${ROOT_PREFIX}/var/cache/kpm/bin" \
     "${ROOT_PREFIX}/var/cache/kpm/sources" \
@@ -84,7 +84,7 @@ cat > "$KPM_INI" <<EOF
 [paths]
 root = /
 ports_dir = ${PORTS_DIR}
-collections = rolling, core, opt, xorg, contrib
+collections = pkg-tools, kernel, core, opt, xorg, contrib
 cache_dir = /var/cache/kpm
 source_cache = /var/cache/kpm/sources
 package_dir = /var/cache/kpm/packages
@@ -123,19 +123,19 @@ color = auto
 EOF
 chmod 0644 "$KPM_INI"
 
-GPORTS_LIST="${ROOT_PREFIX}/etc/gports/sources.list"
-if [[ ! -f "$GPORTS_LIST" ]]; then
-    cat > "$GPORTS_LIST" <<EOF
-# /etc/gports/sources.list - KryX Linux ports collections (overlay: rolling -> CRUX)
+PORTS_LIST="${ROOT_PREFIX}/etc/ports/sources.list"
+if [[ ! -f "$PORTS_LIST" ]]; then
+    cat > "$PORTS_LIST" <<EOF
+# /etc/ports/sources.list - KryX Linux ports collections (used by \`ports\` / \`kpm ports\`)
 # Format: <protocol> <collection> <url> [destination]
-# Place custom third-party overlays in /etc/gports/sources.list.d/*.list
-git rolling https://github.com/${REPO_SLUG}.git ${PORTS_DIR}/rolling-repo
-git core    https://git.crux.nu/ports/core.git
-git opt     https://git.crux.nu/ports/opt.git
-git xorg    https://git.crux.nu/ports/xorg.git
-git contrib https://git.crux.nu/ports/contrib.git
+# Place custom third-party overlays in /etc/ports/sources.list.d/*.list
+git kryx    https://github.com/${REPO_SLUG}.git
+git core    https://github.com/kryx-linux/core.git
+git opt     https://github.com/kryx-linux/opt.git
+git xorg    https://github.com/kryx-linux/xorg.git
+git contrib https://github.com/kryx-linux/contrib.git
 EOF
-    chmod 0644 "$GPORTS_LIST"
+    chmod 0644 "$PORTS_LIST"
 fi
 
 if [[ ! -f "${ROOT_PREFIX}/etc/pkgadd.conf" ]]; then
@@ -144,7 +144,7 @@ if [[ ! -f "${ROOT_PREFIX}/etc/pkgadd.conf" ]]; then
 UPGRADE		^etc/.*$		NO
 UPGRADE		^var/log/.*$		NO
 UPGRADE		^etc/kpm\.ini$		NO
-UPGRADE		^etc/gports/sources\.list$	NO
+UPGRADE		^etc/ports/sources\.list$	NO
 EOF
     chmod 0644 "${ROOT_PREFIX}/etc/pkgadd.conf"
 fi
@@ -190,11 +190,14 @@ if [[ "$DO_SYNC" -eq 1 ]]; then
 fi
 
 if [[ "$DO_SYNC_PORTS" -eq 1 ]]; then
-    if command -v gports >/dev/null 2>&1; then
-        echo "[setup-repo] Syncing local ports tree via gports..."
-        gports -c "$GPORTS_LIST" -p "${ROOT_PREFIX}${PORTS_DIR}" -u
+    if [[ -x "$KPM_BIN" ]]; then
+        echo "[setup-repo] Syncing local ports tree via kpm ports..."
+        "$KPM_BIN" ports -c "$PORTS_LIST" -p "${ROOT_PREFIX}${PORTS_DIR}" -u
+    elif command -v ports >/dev/null 2>&1; then
+        echo "[setup-repo] Syncing local ports tree via ports..."
+        ports -c "$PORTS_LIST" -p "${ROOT_PREFIX}${PORTS_DIR}" -u
     else
-        echo "setup-repo: warning: gports not found in PATH; skipping ports sync" >&2
+        echo "setup-repo: warning: kpm/ports not found in PATH; skipping ports sync" >&2
     fi
 fi
 

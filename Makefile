@@ -71,19 +71,20 @@ install: build
 	fi
 	@if [ -z "$(DESTDIR)" ]; then \
 		for stale in /sbin/kpm /sbin/kpm-index /sbin/kryx-src /usr/local/bin/kpm /usr/local/bin/kpm-index /usr/local/bin/kryx-src; do \
-			if [ -e "$$stale" ]; then \
-				echo "WARNING: legacy binary found at $$stale (may shadow $(BINDIR)/kpm in PATH). Run 'make clean-legacy' and 'hash -r'."; \
+			base="$$(basename "$$stale")"; \
+			if [ -e "$$stale" ] && [ ! "$$stale" -ef "$(BINDIR)/$$base" ]; then \
+				echo "WARNING: legacy binary found at $$stale (may shadow $(BINDIR)/$$base in PATH). Run 'make clean-legacy' and 'hash -r'."; \
 			fi; \
 		done; \
 	fi
 
 clean-legacy:
-	rm -f $(DESTDIR)/sbin/kpm \
-	      $(DESTDIR)/sbin/kpm-index \
-	      $(DESTDIR)/sbin/kryx-src \
-	      $(DESTDIR)/usr/local/bin/kpm \
-	      $(DESTDIR)/usr/local/bin/kpm-index \
-	      $(DESTDIR)/usr/local/bin/kryx-src
+	@for stale in $(DESTDIR)/sbin/kpm $(DESTDIR)/sbin/kpm-index $(DESTDIR)/sbin/kryx-src $(DESTDIR)/usr/local/bin/kpm $(DESTDIR)/usr/local/bin/kpm-index $(DESTDIR)/usr/local/bin/kryx-src; do \
+		base="$$(basename "$$stale")"; \
+		if [ -e "$$stale" ] && [ ! "$$stale" -ef "$(DESTDIR)$(BINDIR)/$$base" ]; then \
+			rm -f "$$stale"; \
+		fi; \
+	done
 	@echo "Legacy binaries removed. Run 'hash -r' in your shell to clear cached command paths."
 
 uninstall:
