@@ -137,6 +137,16 @@ func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) 
 		runErr = cmdRejected(cfg, cmdArgs, stdout, stderr, styles)
 	case "key":
 		runErr = cmdKey(cfg, cmdArgs, stdout, stderr, styles)
+	case "ports":
+		pArgs := make([]string, 0, len(cmdArgs)+4)
+		if globalFlags.configPath != "" {
+			pArgs = append(pArgs, "--kpm-config", globalFlags.configPath)
+		}
+		if globalFlags.rootOverride != "" {
+			pArgs = append(pArgs, "--root", globalFlags.rootOverride)
+		}
+		pArgs = append(pArgs, cmdArgs...)
+		return runPorts(pArgs, stdout, stderr)
 	case "help", "h", "-h", "--help":
 		printUsage(stdout)
 		return 0

@@ -1,19 +1,22 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/kryx-linux/kpm/internal/archive"
 	"github.com/kryx-linux/kpm/internal/builder"
 	"github.com/kryx-linux/kpm/internal/config"
 	"github.com/kryx-linux/kpm/internal/pkgops"
 	"github.com/kryx-linux/kpm/internal/ports"
+	"github.com/kryx-linux/kpm/internal/portscli"
 	"github.com/kryx-linux/kpm/internal/rejected"
 	"github.com/kryx-linux/kpm/internal/state"
 )
@@ -43,7 +46,7 @@ func RunWithArgv0Options(argv0 string, args []string, stdout, stderr io.Writer, 
 		return runPkginfo(args, stdout, stderr)
 	case "pkgmk":
 		return runPkgmk(args, stdout, stderr, rt)
-	case "ports":
+	case "ports", "gports":
 		return runPorts(args, stdout, stderr)
 	case "rejmerge":
 		return runRejmerge(args, stdout, stderr)
@@ -757,144 +760,12 @@ func runSinglePkgmk(cfg config.Config, port ports.Port, f pkgmkFlags, stdout, st
 	return 0
 }
 
-// --- ports (100% parity with upstream CRUX ports/ports.in) ---
+// --- ports (integrated pure-Go ports engine + 100% CRUX ports(8) parity) ---
 
 func runPorts(args []string, stdout, stderr io.Writer) int {
-	mode := ""
-	var collections []string
-
-	for _, a := range args {
-		switch a {
-		case "-h", "--help":
-			fmt.Fprint(stdout, `usage: ports [options] [collection ...]
-options:
-  -u, --update    update ports
-  -l, --list      list ports
-  -d, --diff      list version differences
-  -v, --version   print version and exit
-  -h, --help      print help and exit
-`)
-			return 0
-		case "-v", "--version":
-			fmt.Fprintf(stdout, "ports (kpm) %s\n", Version)
-			return 0
-		case "-u", "--update":
-			mode = "update"
-		case "-l", "--list":
-			mode = "list"
-		case "-d", "--diff":
-			mode = "diff"
-		default:
-			if strings.HasPrefix(a, "-") {
-				fmt.Fprintf(stderr, "ports: invalid option %s\n", a)
-				return 1
-			}
-			collections = append(collections, a)
-		}
-	}
-
-	if mode == "" {
-		fmt.Fprintf(stderr, "ports: option missing (try 'ports --help')\n")
-		return 1
-	}
-
-	cfg, _ := config.Load(config.ResolvePath(""), false)
-	portsDir := cfg.Paths.PortsDir
-	if env := strings.TrimSpace(os.Getenv("PORTS_DIR")); env != "" {
-		portsDir = env
-	} else if env := strings.TrimSpace(os.Getenv("KPM_PORTS_DIR")); env != "" {
-		portsDir = env
-	} else if env := strings.TrimSpace(os.Getenv("KRYX_PORTS_DIR")); env != "" {
-		portsDir = env
-	}
-	if portsDir == "" {
-		portsDir = "/usr/ports"
-	}
-
-	switch mode {
-	case "update":
-		if err := ports.SyncPorts(portsDir, cfg.Paths.PortsConfDir, cfg.Paths.PortsDriversDir, collections, stdout, stderr); err != nil {
-			fmt.Fprintf(stderr, "ports: %v\n", err)
-			return 1
-		}
-		return 0
-
-	case "list":
-		entries, err := ports.ListEntries(portsDir, collections)
-		if err != nil {
-			fmt.Fprintf(stderr, "ports: %v\n", err)
-			return 1
-		}
-		for _, e := range entries {
-			fmt.Fprintln(stdout, e)
-		}
-		return 0
-
-	case "diff":
-		db, err := openDBReadOnly(cfg.Paths.Root)
-		if err != nil {
-			fmt.Fprintf(stderr, "ports: %v\n", err)
-			return 1
-		}
-		allPorts, err := ports.DiscoverAll(portsDir, collections)
-		if err != nil {
-			fmt.Fprintf(stderr, "ports: %v\n", err)
-			return 1
-		}
-		byName := make(map[string][]ports.Port)
-		for _, p := range allPorts {
-			byName[p.Name] = append(byName[p.Name], p)
-		}
-		type diffRow struct {
-			col, name, portVer, instVer string
-		}
-		var rows []diffRow
-		for _, instName := range db.SortedNames() {
-			instVer := db.Packages[instName].Version
-			plist := byName[instName]
-			if len(plist) == 0 {
-				if len(collections) == 0 {
-					rows = append(rows, diffRow{
-						col:     "None",
-						name:    instName,
-						portVer: "MISSING",
-						instVer: instVer,
-					})
-				}
-				continue
-			}
-			for _, p := range plist {
-				if p.FullVersion() != instVer {
-					col := p.Collection
-					if col == "" {
-						col = "None"
-					}
-					rows = append(rows, diffRow{
-						col:     col,
-						name:    instName,
-						portVer: p.FullVersion(),
-						instVer: instVer,
-					})
-				}
-			}
-		}
-		if len(rows) == 0 {
-			fmt.Fprintln(stdout, "No differences found")
-			return 0
-		}
-		sort.Slice(rows, func(i, j int) bool {
-			if rows[i].col != rows[j].col {
-				return rows[i].col < rows[j].col
-			}
-			return rows[i].name < rows[j].name
-		})
-		fmt.Fprintf(stdout, "%-16s%-24s%-20s%s\n", "Collection", "Name", "Port", "Installed")
-		for _, r := range rows {
-			fmt.Fprintf(stdout, "%-16s%-24s%-20s%s\n", r.col, r.name, r.portVer, r.instVer)
-		}
-		return 0
-	}
-	return 1
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return portscli.Run(ctx, args, stdout, stderr, Version)
 }
 
 // --- rejmerge (100% parity with upstream CRUX pkgutils/rejmerge.in) ---

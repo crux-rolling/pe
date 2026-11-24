@@ -6,8 +6,9 @@ ETCDIR ?= /etc
 PROFILED ?= $(ETCDIR)/profile.d
 DESTDIR ?=
 
-VERSION ?= 0.5.3
+VERSION ?= 0.6.0
 LDFLAGS := -s -w -X github.com/kryx-linux/kpm/internal/cli.Version=$(VERSION)
+MODFLAGS ?= -mod=vendor
 GO_SRCS := $(shell find cmd internal -type f -name '*.go') go.mod
 
 .PHONY: all build test verify clean install uninstall clean-legacy purge
@@ -18,18 +19,18 @@ build: bin/kpm bin/kpm-index bin/kryx-src
 
 bin/kpm: $(GO_SRCS)
 	@mkdir -p bin
-	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/kpm
+	CGO_ENABLED=0 go build $(MODFLAGS) -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/kpm
 
 bin/kpm-index: $(GO_SRCS)
 	@mkdir -p bin
-	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/kpm-index
+	CGO_ENABLED=0 go build $(MODFLAGS) -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/kpm-index
 
 bin/kryx-src: $(GO_SRCS)
 	@mkdir -p bin
-	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/kryx-src
+	CGO_ENABLED=0 go build $(MODFLAGS) -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/kryx-src
 
 test:
-	go test -v ./...
+	CGO_ENABLED=0 go test $(MODFLAGS) -v ./...
 
 verify: test build
 
@@ -49,6 +50,7 @@ install: build
 	install -D -m 0644 man/kpm.8 $(DESTDIR)$(MANDIR)/man8/kpm.8
 	install -D -m 0644 man/kpm-index.8 $(DESTDIR)$(MANDIR)/man8/kpm-index.8
 	install -D -m 0644 man/kryx-src.8 $(DESTDIR)$(MANDIR)/man8/kryx-src.8
+	install -D -m 0644 man/ports.8 $(DESTDIR)$(MANDIR)/man8/ports.8
 	install -D -m 0644 man/setup.8 $(DESTDIR)$(MANDIR)/man8/setup.8
 	install -D -m 0644 man/setup-kryx.8 $(DESTDIR)$(MANDIR)/man8/setup-kryx.8
 	install -D -m 0644 man/setup-chroot.8 $(DESTDIR)$(MANDIR)/man8/setup-chroot.8
@@ -56,6 +58,10 @@ install: build
 	install -D -m 0644 completions/bash/kpm $(DESTDIR)$(BASHCOMPDIR)/kpm
 	ln -sf kpm $(DESTDIR)$(BASHCOMPDIR)/kpm-index
 	install -D -m 0644 completions/bash/kpm.profile.sh $(DESTDIR)$(PROFILED)/kpm-completion.sh
+	install -d -m 0755 $(DESTDIR)$(ETCDIR)/ports/sources.list.d
+	if [ ! -f $(DESTDIR)$(ETCDIR)/ports/sources.list ]; then \
+		install -D -m 0644 configs/sources.list $(DESTDIR)$(ETCDIR)/ports/sources.list; \
+	fi
 	if [ ! -f $(DESTDIR)$(ETCDIR)/kpm.ini ]; then \
 		install -D -m 0644 kpm.ini.example $(DESTDIR)$(ETCDIR)/kpm.ini; \
 	fi
@@ -87,6 +93,7 @@ uninstall:
 	      $(DESTDIR)$(MANDIR)/man8/kpm.8 \
 	      $(DESTDIR)$(MANDIR)/man8/kpm-index.8 \
 	      $(DESTDIR)$(MANDIR)/man8/kryx-src.8 \
+	      $(DESTDIR)$(MANDIR)/man8/ports.8 \
 	      $(DESTDIR)$(MANDIR)/man8/setup.8 \
 	      $(DESTDIR)$(MANDIR)/man8/setup-kryx.8 \
 	      $(DESTDIR)$(MANDIR)/man8/setup-chroot.8 \
