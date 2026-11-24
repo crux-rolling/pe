@@ -18,7 +18,7 @@ func TestDoctorDetectsShadowedPathBinaryAndValidDB(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Simulate legacy /sbin/pe shadowing /usr/bin/pe in PATH.
+	// Simulate legacy /sbin/kpm shadowing /usr/bin/kpm in PATH.
 	fakeSbin := filepath.Join(tmp, "sbin")
 	fakeUsrBin := filepath.Join(tmp, "usr", "bin")
 	if err := os.MkdirAll(fakeSbin, 0o755); err != nil {
@@ -27,16 +27,16 @@ func TestDoctorDetectsShadowedPathBinaryAndValidDB(t *testing.T) {
 	if err := os.MkdirAll(fakeUsrBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(fakeSbin, "pe"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(fakeSbin, "kpm"), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(fakeUsrBin, "pe"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(fakeUsrBin, "kpm"), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Setenv("PATH", fakeSbin+string(os.PathListSeparator)+fakeUsrBin)
 
-	cfgPath := filepath.Join(tmp, "pe.ini")
+	cfgPath := filepath.Join(tmp, "kpm.ini")
 	if err := os.WriteFile(cfgPath, []byte("[paths]\nroot = "+rootDir+"\nports_dir = "+filepath.Join(tmp, "ports")+"\ncache_dir = "+filepath.Join(tmp, "cache")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestDoctorDetectsShadowedPathBinaryAndValidDB(t *testing.T) {
 func TestKeyGenTrustListRevokeAndMultiRepoConfig(t *testing.T) {
 	tmp := t.TempDir()
 	keysDir := filepath.Join(tmp, "keys.d")
-	cfgPath := filepath.Join(tmp, "pe.ini")
+	cfgPath := filepath.Join(tmp, "kpm.ini")
 	cfgBody := "[paths]\nroot = " + tmp + "\nports_dir = " + filepath.Join(tmp, "p1") + ", " + filepath.Join(tmp, "p2") +
 		"\ncache_dir = " + filepath.Join(tmp, "cache") + "\nkeys_dir = " + keysDir +
 		"\n\n[repo.primary]\nrepository = kryx-linux/ports\ntag = rolling-x86_64\nverify_signature = true\n" +

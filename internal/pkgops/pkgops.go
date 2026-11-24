@@ -8,8 +8,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/kryx-linux/pe/internal/archive"
-	"github.com/kryx-linux/pe/internal/pkgdb"
+	"github.com/kryx-linux/kpm/internal/archive"
+	"github.com/kryx-linux/kpm/internal/pkgdb"
 )
 
 // DefaultMaxConflictsDisplayed limits conflict lines printed to stderr unless Verbose is set.
@@ -23,6 +23,7 @@ type InstallOptions struct {
 	Reinstall     bool
 	Force         bool
 	Verbose       bool
+	LogPrefix     string
 	SkipRootCheck bool
 	SkipLdconfig  bool
 	Out           io.Writer
@@ -124,7 +125,7 @@ func InstallArchive(archivePath string, opts InstallOptions) (pkgName, version s
 		return "", "", err
 	}
 
-	if err := archive.Extract(archivePath, opts.Root, keepList, nonInstallFiles, installed, opts.Out, opts.ErrOut); err != nil {
+	if err := archive.ExtractWithPrefix(archivePath, opts.Root, keepList, nonInstallFiles, installed, opts.LogPrefix, opts.Out, opts.ErrOut); err != nil {
 		if !installed {
 			db.RemovePkg(name, nil, opts.ErrOut)
 			_ = db.Commit()

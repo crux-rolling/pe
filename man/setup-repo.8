@@ -1,6 +1,6 @@
 .TH SETUP\-REPO 8 "November 2026" "kryx-linux" "System Administration"
 .SH NAME
-setup\-repo \- initialize KryX Linux pe and gports repositories and keyring
+setup\-repo \- initialize KryX Linux kpm and gports repositories and keyring
 .SH SYNOPSIS
 .B setup\-repo
 .RI [ options ]
@@ -10,15 +10,15 @@ creates the standard KryX Linux repository configuration under
 .I /
 or an alternative target root
 .RB ( \-\-root ):
-.IR /etc/pe.ini ,
+.IR /etc/kpm.ini ,
 .IR /etc/gports/sources.list ,
 .IR /etc/gports/sources.list.d/ ,
-.IR /etc/pe/keys.d/ ,
+.IR /etc/kpm/keys.d/ ,
 .IR /etc/pkgadd.conf ,
 and
 .IR /var/lib/pkg/db .
 It then synchronizes the remote binary repository index via
-.B pe sync
+.B kpm sync
 (unless
 .B \-\-no\-sync
 is specified).
@@ -60,7 +60,7 @@ Trust an Ed25519 release signing public key in
 Set
 .B verify_signature = true
 in generated
-.IR pe.ini .
+.IR kpm.ini .
 .TP
 .B \-\-sync\-ports
 Also synchronize local ports via
@@ -70,9 +70,9 @@ if installed.
 .B \-\-no\-sync
 Write configuration files without performing network I/O.
 .TP
-.B \-\-pe\-bin \fIpath\fR
+.B \-\-kpm\-bin \fIpath\fR
 Explicit path to the static
-.B pe
+.B kpm
 binary.
 .SH EXAMPLES
 .RS
@@ -87,5 +87,5 @@ setup\-repo \-\-root /mnt \-\-no\-sync
 .BR setup (8),
 .BR setup\-kryx (8),
 .BR setup\-chroot (8),
-.BR pe (8),
+.BR kpm (8),
 .BR gports (8)

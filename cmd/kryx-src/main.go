@@ -12,9 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kryx-linux/pe/internal/cli"
-	"github.com/kryx-linux/pe/internal/signing"
-	"github.com/kryx-linux/pe/internal/srcmachine"
+	"github.com/kryx-linux/kpm/internal/cli"
+	"github.com/kryx-linux/kpm/internal/signing"
+	"github.com/kryx-linux/kpm/internal/srcmachine"
 )
 
 func main() {
@@ -94,27 +94,42 @@ Commands:
   lint, check      Validate Pkgfiles, dir/name alignment, duplicate names, deps, and cycles
   list, ls         List discovered ports (relative path, Pkgfile name, version)
   stage, index     Generate/update index.json and optional GitHub-safe release upload assets
-  sign             Sign index.json with an Ed25519 private key (-> index.json.sig)
+  sign             Sign index.json with a signify/Ed25519 private key (-> index.json.sig)
   rewrite-urls     Rewrite index.json URLs from GitHub release assets JSON and verify built archives
   version          Print version and exit
   help             Show this help message
 
+Ports directory resolution priority (no hardcoded /usr/ports requirement):
+  1. --ports-dir / -P / --ports <path>
+  2. $KRYX_PORTS_DIR or $KPM_PORTS_DIR
+  3. [paths] ports_dir in kpm.ini
+  4. Workspace auto-detection (./Pkgfile, ./ports, or ./core|opt|xorg|contrib|rolling)
+  5. /usr/ports (only if present on disk)
+
 Run 'kryx-src <command> --help' for command-specific flags.
 `)
+}
+
+func bindPortsFlags(fs *flag.FlagSet) *string {
+	var portsDir string
+	fs.StringVar(&portsDir, "ports-dir", "", "ports tree directory or single-port repo root")
+	fs.StringVar(&portsDir, "P", "", "shorthand for --ports-dir")
+	fs.StringVar(&portsDir, "ports", "", "alias for --ports-dir")
+	return &portsDir
 }
 
 func cmdPkg(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("pkg", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
-	portsDir := fs.String("ports", "/usr/ports", "ports tree directory or single-port repo root")
+	portsDir := bindPortsFlags(fs)
 	fromGit := fs.String("from-git", "", "clone and build a Nix-like source repo directly (<url>[@ref])")
 	collections := fs.String("collections", "", "comma-separated collection priority order (empty = auto-discover)")
 	repoHint := fs.String("port-repo", "", "optional source repo slug hint (e.g. kryx-linux/kernel)")
 	workRoot := fs.String("work-root", "", "isolated build work root (contains cache/sources/work/packages)")
 	outDir := fs.String("out-dir", "", "output directory for built .pkg.tar.<ext> archives")
 	root := fs.String("root", "/", "target CRUX rootfs for installing build dependencies")
-	cfgPath := fs.String("config", "", "optional base pe.ini configuration file")
+	cfgPath := fs.String("config", "", "optional base kpm.ini configuration file")
 	repository := fs.String("repo", "kryx-linux/ports", "binary repository slug for index.json dep reuse")
 	releaseTag := fs.String("tag", "rolling-x86_64", "binary release tag")
 	arch := fs.String("arch", "x86_64", "target architecture")
@@ -140,7 +155,7 @@ func cmdPkg(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	targets := fs.Args()
-	effectivePorts := *portsDir
+	effectivePorts := strings.TrimSpace(*portsDir)
 	if strings.TrimSpace(*fromGit) != "" {
 		repoURL := strings.TrimSpace(*fromGit)
 		ref := ""
@@ -169,6 +184,12 @@ func cmdPkg(args []string, stdout, stderr io.Writer) error {
 		if len(targets) == 0 {
 			targets = []string{"."}
 		}
+	} else {
+		resolved, err := srcmachine.ResolvePortsDir(effectivePorts, *cfgPath, "")
+		if err != nil {
+			return err
+		}
+		effectivePorts = resolved
 	}
 	if len(targets) == 0 {
 		return fmt.Errorf("usage: kryx-src pkg [options] <port|collection|all...>")
@@ -222,14 +243,19 @@ func cmdPkg(args []string, stdout, stderr io.Writer) error {
 func cmdLint(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("lint", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	portsDir := fs.String("ports", "/usr/ports", "ports tree directory or single-port repo root")
+	portsDir := bindPortsFlags(fs)
+	cfgPath := fs.String("config", "", "optional kpm.ini configuration file")
 	collections := fs.String("collections", "", "comma-separated collection list")
 	strict := fs.Bool("strict", false, "treat warnings (e.g. dir!=name, missing deps) as errors")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	reg, err := srcmachine.LoadRegistry(*portsDir, splitCSV(*collections))
+	resolvedPorts, err := srcmachine.ResolvePortsDir(*portsDir, *cfgPath, "")
+	if err != nil {
+		return err
+	}
+	reg, err := srcmachine.LoadRegistry(resolvedPorts, splitCSV(*collections))
 	if err != nil {
 		return err
 	}
@@ -262,14 +288,19 @@ func cmdLint(args []string, stdout, stderr io.Writer) error {
 func cmdList(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	portsDir := fs.String("ports", "/usr/ports", "ports tree directory or single-port repo root")
+	portsDir := bindPortsFlags(fs)
+	cfgPath := fs.String("config", "", "optional kpm.ini configuration file")
 	collections := fs.String("collections", "", "comma-separated collection list")
 	asJSON := fs.Bool("json", false, "output structured JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	reg, err := srcmachine.LoadRegistry(*portsDir, splitCSV(*collections))
+	resolvedPorts, err := srcmachine.ResolvePortsDir(*portsDir, *cfgPath, "")
+	if err != nil {
+		return err
+	}
+	reg, err := srcmachine.LoadRegistry(resolvedPorts, splitCSV(*collections))
 	if err != nil {
 		return err
 	}
@@ -324,7 +355,8 @@ func cmdStage(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("stage", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	packagesDir := fs.String("packages", ".", "directory containing built .pkg.tar.<ext> archives")
-	portsDir := fs.String("ports", "", "optional ports directory for description/depends/collection enrichment")
+	portsDir := bindPortsFlags(fs)
+	cfgPath := fs.String("config", "", "optional kpm.ini configuration file")
 	indexPath := fs.String("index", "index.json", "path to index.json to create or update")
 	uploadDir := fs.String("upload-dir", "", "optional directory to stage GitHub-safe ('#' -> '.') upload copies")
 	baseURL := fs.String("base-url", "", "base download URL for index entries")
@@ -334,9 +366,23 @@ func cmdStage(args []string, stdout, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
+	effPorts := strings.TrimSpace(*portsDir)
+	if effPorts != "" {
+		resolved, err := srcmachine.ResolvePortsDir(effPorts, *cfgPath, "")
+		if err != nil {
+			return err
+		}
+		effPorts = resolved
+	} else if env := strings.TrimSpace(os.Getenv("KRYX_PORTS_DIR")); env != "" {
+		effPorts = env
+	} else if env := strings.TrimSpace(os.Getenv("KPM_PORTS_DIR")); env != "" {
+		effPorts = env
+	}
+
 	res, err := srcmachine.Stage(srcmachine.StageOptions{
 		PackagesDir: *packagesDir,
-		PortsDir:    *portsDir,
+		PortsDir:    effPorts,
 		IndexPath:   *indexPath,
 		UploadDir:   *uploadDir,
 		BaseURL:     *baseURL,
@@ -373,9 +419,10 @@ func cmdRewriteURLs(args []string, stdout, stderr io.Writer) error {
 func cmdSign(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("sign", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	keyPath := fs.String("key", "", "path to kryx-ed25519 private key file")
+	keyPath := fs.String("key", "", "path to signify or kryx-ed25519 private key file")
 	filePath := fs.String("file", "index.json", "file to sign (e.g. index.json)")
 	outSig := fs.String("out", "", "output signature path (default: <file>.sig)")
+	signifyFmt := fs.Bool("signify", false, "emit OpenBSD signify-compatible detached signature")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -386,7 +433,13 @@ func cmdSign(args []string, stdout, stderr io.Writer) error {
 	if sigPath == "" {
 		sigPath = *filePath + ".sig"
 	}
-	keyID, err := signing.SignFile(*keyPath, *filePath, sigPath)
+	var keyID string
+	var err error
+	if *signifyFmt {
+		keyID, err = signing.SignFileSignify(*keyPath, *filePath, sigPath)
+	} else {
+		keyID, err = signing.SignFile(*keyPath, *filePath, sigPath)
+	}
 	if err != nil {
 		return err
 	}
@@ -397,7 +450,8 @@ func cmdSign(args []string, stdout, stderr io.Writer) error {
 func cmdPlan(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	portsDir := fs.String("ports", "/usr/ports", "ports tree directory or single-port repo root")
+	portsDir := bindPortsFlags(fs)
+	cfgPath := fs.String("config", "", "optional kpm.ini configuration file")
 	collections := fs.String("collections", "", "comma-separated collection list")
 	repoHint := fs.String("port-repo", "", "optional source repo slug hint")
 	maxPorts := fs.Int("max-ports", 20, "maximum number of ports to include per workflow run")
@@ -410,7 +464,11 @@ func cmdPlan(args []string, stdout, stderr io.Writer) error {
 	if len(targets) == 0 {
 		return fmt.Errorf("usage: kryx-src plan [options] <port|collection|all...>")
 	}
-	reg, err := srcmachine.LoadRegistry(*portsDir, splitCSV(*collections))
+	resolvedPorts, err := srcmachine.ResolvePortsDir(*portsDir, *cfgPath, "")
+	if err != nil {
+		return err
+	}
+	reg, err := srcmachine.LoadRegistry(resolvedPorts, splitCSV(*collections))
 	if err != nil {
 		return err
 	}

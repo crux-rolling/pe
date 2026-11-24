@@ -1,5 +1,5 @@
 // Package builder executes CRUX Pkgfile recipes adapted from pkgutils/pkgmk,
-// driven by pe's manual INI configuration.
+// driven by kpm's manual INI configuration.
 package builder
 
 import (
@@ -19,10 +19,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kryx-linux/pe/internal/archive"
-	"github.com/kryx-linux/pe/internal/config"
-	"github.com/kryx-linux/pe/internal/ports"
-	"github.com/kryx-linux/pe/internal/ui"
+	"github.com/kryx-linux/kpm/internal/archive"
+	"github.com/kryx-linux/kpm/internal/config"
+	"github.com/kryx-linux/kpm/internal/ports"
+	"github.com/kryx-linux/kpm/internal/ui"
 )
 
 // Options customizes a single Pkgfile build invocation.
@@ -35,6 +35,7 @@ type Options struct {
 	IgnoreSignature bool
 	KeepWork        bool
 	NoStrip         bool
+	PublicKey       string
 	Out             io.Writer
 	ErrOut          io.Writer
 }
@@ -58,18 +59,18 @@ func Build(cfg config.Config, port ports.Port, opts Options) (Result, error) {
 	// Always evaluate Pkgfile freshly with bash before building.
 	evaluated, err := ports.ParsePkgfile(port.Dir, cfg.Paths.PortsDir)
 	if err != nil {
-		return Result{}, err
+		return Result{}, exitErr(ExitPkgfile, err)
 	}
 	port = evaluated
 
 	if err := os.MkdirAll(cfg.Paths.SourceCache, 0o755); err != nil {
-		return Result{}, fmt.Errorf("create source_cache %q: %w", cfg.Paths.SourceCache, err)
+		return Result{}, exitErr(ExitDirPerm, fmt.Errorf("create source_cache %q: %w", cfg.Paths.SourceCache, err))
 	}
 	if err := os.MkdirAll(cfg.Paths.PackageDir, 0o755); err != nil {
-		return Result{}, fmt.Errorf("create package_dir %q: %w", cfg.Paths.PackageDir, err)
+		return Result{}, exitErr(ExitDirPerm, fmt.Errorf("create package_dir %q: %w", cfg.Paths.PackageDir, err))
 	}
 	if err := os.MkdirAll(cfg.Paths.WorkDir, 0o755); err != nil {
-		return Result{}, fmt.Errorf("create work_dir %q: %w", cfg.Paths.WorkDir, err)
+		return Result{}, exitErr(ExitDirPerm, fmt.Errorf("create work_dir %q: %w", cfg.Paths.WorkDir, err))
 	}
 
 	targetName := archive.FormatPkgFilename(port.Name, port.Version, port.Release, cfg.Build.Compression)
@@ -83,7 +84,7 @@ func Build(cfg config.Config, port ports.Port, opts Options) (Result, error) {
 	// Step 1: Download missing remote sources into source_cache.
 	localSources, err := resolveAndDownloadSources(cfg, port, opts.Out)
 	if err != nil {
-		return Result{}, err
+		return Result{}, exitErr(ExitDownload, err)
 	}
 
 	// Step 2: Prepare work directory ($SRC and $PKG).
@@ -92,13 +93,13 @@ func Build(cfg config.Config, port ports.Port, opts Options) (Result, error) {
 	pkgDir := filepath.Join(workDir, "pkg")
 
 	if err := os.RemoveAll(workDir); err != nil {
-		return Result{}, fmt.Errorf("clean work dir %q: %w", workDir, err)
+		return Result{}, exitErr(ExitDirPerm, fmt.Errorf("clean work dir %q: %w", workDir, err))
 	}
 	if err := os.MkdirAll(srcDir, 0o755); err != nil {
-		return Result{}, fmt.Errorf("create SRC dir: %w", err)
+		return Result{}, exitErr(ExitDirPerm, fmt.Errorf("create SRC dir: %w", err))
 	}
 	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
-		return Result{}, fmt.Errorf("create PKG dir: %w", err)
+		return Result{}, exitErr(ExitDirPerm, fmt.Errorf("create PKG dir: %w", err))
 	}
 
 	keepWork := cfg.Build.KeepWork || opts.KeepWork
@@ -115,15 +116,15 @@ func Build(cfg config.Config, port ports.Port, opts Options) (Result, error) {
 	if !ignoreSig {
 		sigPath := filepath.Join(port.Dir, ".signature")
 		if _, err := os.Stat(sigPath); err == nil {
-			if err := verifySignature(port, srcDir, localSources); err != nil {
-				return Result{}, err
+			if err := verifySignature(port, srcDir, localSources, opts.PublicKey); err != nil {
+				return Result{}, exitErr(ExitSignature, err)
 			}
 			sigVerified = true
 		}
 	}
 	if !ignoreMD5 && !sigVerified {
 		if err := verifyMD5Sum(port, localSources, opts.ErrOut); err != nil {
-			return Result{}, err
+			return Result{}, exitErr(ExitMD5, err)
 		}
 	}
 
@@ -131,7 +132,7 @@ func Build(cfg config.Config, port ports.Port, opts Options) (Result, error) {
 
 	// Step 4: Unpack sources and run Pkgfile build() inside bash (matching pkgmk.in).
 	if err := runPkgfileBuild(cfg, port, localSources, workDir, srcDir, pkgDir, opts.Out, opts.ErrOut); err != nil {
-		return Result{}, fmt.Errorf("building '%s' failed: %w", targetPath, err)
+		return Result{}, exitErr(ExitBuild, fmt.Errorf("building '%s' failed: %w", targetPath, err))
 	}
 
 	// Step 5: Strip binaries and compress manpages (matching pkgmk.in).
@@ -148,7 +149,7 @@ func Build(cfg config.Config, port ports.Port, opts Options) (Result, error) {
 
 	// Step 6: Package $PKG into CRUX .pkg.tar.<compression>.
 	if err := archive.Create(pkgDir, targetPath, cfg.Build.Compression); err != nil {
-		return Result{}, fmt.Errorf("building '%s' failed: %w", targetPath, err)
+		return Result{}, exitErr(ExitBuild, fmt.Errorf("building '%s' failed: %w", targetPath, err))
 	}
 
 	// Step 7: Check or update .footprint.
@@ -156,14 +157,14 @@ func Build(cfg config.Config, port ports.Port, opts Options) (Result, error) {
 	ignoreNew := cfg.Build.IgnoreNew || opts.IgnoreNew
 	if opts.UpdateFootprint {
 		if err := updateFootprint(port.Dir, targetPath); err != nil {
-			return Result{}, err
+			return Result{}, exitErr(ExitFootprint, err)
 		}
 		fmt.Fprintf(opts.Out, "=======> Footprint updated.\n")
 	} else if ignoreFP {
 		fmt.Fprintf(opts.ErrOut, "=======> WARNING: Footprint ignored.\n")
 	} else {
 		if err := checkFootprint(port.Dir, targetPath, ignoreNew, opts.Out, opts.ErrOut); err != nil {
-			return Result{}, fmt.Errorf("building '%s' failed: %w", targetPath, err)
+			return Result{}, exitErr(ExitFootprint, fmt.Errorf("building '%s' failed: %w", targetPath, err))
 		}
 	}
 
@@ -237,7 +238,7 @@ func resolveAndDownloadSources(cfg config.Config, port ports.Port, out io.Writer
 				return nil, fmt.Errorf("source file %q not found (not a URL)", localPath)
 			}
 			if !cfg.Build.DownloadSources {
-				return nil, fmt.Errorf("source file %q not found (download_sources is disabled in pe.ini)", localPath)
+				return nil, fmt.Errorf("source file %q not found (download_sources is disabled in kpm.ini)", localPath)
 			}
 			if err := downloadSourceFile(cfg, src, localPath, out); err != nil {
 				return nil, err
@@ -376,7 +377,7 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
-func verifySignature(port ports.Port, srcDir string, localSources []string) error {
+func verifySignature(port ports.Port, srcDir string, localSources []string, publicKey string) error {
 	signifyPath, err := exec.LookPath("signify")
 	if err != nil {
 		return fmt.Errorf("signify not found in PATH (use --ignore-signature to skip)")
@@ -405,7 +406,17 @@ func verifySignature(port ports.Port, srcDir string, localSources []string) erro
 		}
 	}()
 
-	cmd := exec.Command(signifyPath, "-q", "-C", "-x", sigPath)
+	args := []string{"-q", "-C"}
+	if strings.TrimSpace(publicKey) != "" {
+		args = append(args, "-p", publicKey)
+	} else if port.Collection != "" {
+		cand := filepath.Join("/etc/ports", port.Collection+".pub")
+		if _, err := os.Stat(cand); err == nil {
+			args = append(args, "-p", cand)
+		}
+	}
+	args = append(args, "-x", sigPath)
+	cmd := exec.Command(signifyPath, args...)
 	cmd.Dir = srcDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("signature verification failed: %s", strings.TrimSpace(string(out)))
@@ -466,12 +477,8 @@ func md5Key(line string) string {
 	return line
 }
 
-func runPkgfileBuild(cfg config.Config, port ports.Port, localSources []string, workDir, srcDir, pkgDir string, out, errOut io.Writer) error {
-	// Default unpack_source matches pkgmk.in, and Pkgfile can override unpack_source() before build() is called.
+func buildUnpackFunction(localSources []string) string {
 	var sb strings.Builder
-	sb.WriteString("set -e\n")
-	sb.WriteString("umask 022\n")
-	sb.WriteString("export LC_ALL=C.UTF-8\n")
 	sb.WriteString("unpack_source() {\n")
 	sb.WriteString("  :\n")
 	for _, src := range localSources {
@@ -484,6 +491,46 @@ func runPkgfileBuild(cfg config.Config, port ports.Port, localSources []string, 
 		sb.WriteString("  esac\n")
 	}
 	sb.WriteString("}\n")
+	return sb.String()
+}
+
+func buildPkgfileEnv(cfg config.Config, port ports.Port, workDir, srcDir, pkgDir string) []string {
+	pkgmkArch := "64"
+	if _, err := os.Stat(filepath.Join(port.Dir, ".32bit")); err == nil {
+		pkgmkArch = "32"
+	}
+	env := append(os.Environ(),
+		"SRC="+srcDir,
+		"PKG="+pkgDir,
+		"PKGMK_ROOT="+port.Dir,
+		"PKGMK_ARCH="+pkgmkArch,
+		"PKGMK_SOURCE_DIR="+cfg.Paths.SourceCache,
+		"PKGMK_PACKAGE_DIR="+cfg.Paths.PackageDir,
+		"PKGMK_WORK_DIR="+workDir,
+		"JOBS="+strconv.Itoa(cfg.Build.Jobs),
+		"CFLAGS="+cfg.Build.CFLAGS,
+		"CXXFLAGS="+cfg.Build.CXXFLAGS,
+		"MAKEFLAGS="+cfg.Build.MAKEFLAGS,
+	)
+	if strings.TrimSpace(cfg.Paths.PortsDir) != "" {
+		env = append(env,
+			"KRYX_PORTS_DIR="+cfg.Paths.PortsDir,
+			"KPM_PORTS_DIR="+cfg.Paths.PortsDir,
+		)
+	}
+	if cfg.Build.LDFLAGS != "" {
+		env = append(env, "LDFLAGS="+cfg.Build.LDFLAGS)
+	}
+	return env
+}
+
+func runPkgfileBuild(cfg config.Config, port ports.Port, localSources []string, workDir, srcDir, pkgDir string, out, errOut io.Writer) error {
+	// Default unpack_source matches pkgmk.in, and Pkgfile can override unpack_source() before build() is called.
+	var sb strings.Builder
+	sb.WriteString("set -e\n")
+	sb.WriteString("umask 022\n")
+	sb.WriteString("export LC_ALL=C.UTF-8\n")
+	sb.WriteString(buildUnpackFunction(localSources))
 	sb.WriteString("source " + shellQuote(filepath.Join(port.Dir, "Pkgfile")) + "\n")
 	sb.WriteString("unpack_source\n")
 	sb.WriteString("cd \"$SRC\"\n")
@@ -493,23 +540,7 @@ func runPkgfileBuild(cfg config.Config, port ports.Port, localSources []string, 
 	cmd.Dir = port.Dir
 	cmd.Stdout = out
 	cmd.Stderr = errOut
-
-	env := append(os.Environ(),
-		"SRC="+srcDir,
-		"PKG="+pkgDir,
-		"PKGMK_ROOT="+port.Dir,
-		"PKGMK_SOURCE_DIR="+cfg.Paths.SourceCache,
-		"PKGMK_PACKAGE_DIR="+cfg.Paths.PackageDir,
-		"PKGMK_WORK_DIR="+workDir,
-		"JOBS="+strconv.Itoa(cfg.Build.Jobs),
-		"CFLAGS="+cfg.Build.CFLAGS,
-		"CXXFLAGS="+cfg.Build.CXXFLAGS,
-		"MAKEFLAGS="+cfg.Build.MAKEFLAGS,
-	)
-	if cfg.Build.LDFLAGS != "" {
-		env = append(env, "LDFLAGS="+cfg.Build.LDFLAGS)
-	}
-	cmd.Env = env
+	cmd.Env = buildPkgfileEnv(cfg, port, workDir, srcDir, pkgDir)
 	return cmd.Run()
 }
 

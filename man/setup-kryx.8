@@ -28,7 +28,7 @@ Two installation modes are supported:
 .TP
 .B online
 Install KryX packages directly from the remote
-.BR pe (8)
+.BR kpm (8)
 binary repository
 .RB ( kryx-linux/ports
 .BR rolling\-x86_64 ).
@@ -39,7 +39,7 @@ Install offline CRUX
 packages from mounted CRUX ISO media
 .RI ( /media/crux/core )
 via static
-.B pe \-\-root
+.B kpm \-\-root
 and overlay KryX binary packages and configuration on top.
 .SH OPTIONS
 .TP
@@ -63,9 +63,9 @@ Pre\-fill binary repository slug (default:
 Pre\-fill binary release tag (default:
 .BR rolling\-x86_64 ).
 .TP
-.B \-\-pe\-bin \fIpath\fR
+.B \-\-kpm\-bin \fIpath\fR
 Explicit path to the static
-.B pe
+.B kpm
 binary.
 .SH EXAMPLES
 .RS
@@ -79,4 +79,4 @@ setup\-kryx \-\-root /mnt \-\-plain
 .BR setup (8),
 .BR setup\-chroot (8),
 .BR setup\-repo (8),
-.BR pe (8)
+.BR kpm (8)

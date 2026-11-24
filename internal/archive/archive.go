@@ -21,7 +21,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kryx-linux/pe/internal/pkgdb"
+	"github.com/kryx-linux/kpm/internal/pkgdb"
 )
 
 const (
@@ -138,11 +138,19 @@ func Open(filename string) (string, pkgdb.PkgInfo, error) {
 //   identical/empty with matching permissions; otherwise a rejection notice is printed.
 // - On non-upgrade installs, any extraction error aborts immediately; on upgrades it logs and continues.
 func Extract(filename, root string, keepList, nonInstallList map[string]struct{}, upgrade bool, out, errOut io.Writer) error {
+	return ExtractWithPrefix(filename, root, keepList, nonInstallList, upgrade, "kpm", out, errOut)
+}
+
+// ExtractWithPrefix is like Extract but lets callers choose the log prefix (e.g. "pkgadd" vs "kpm").
+func ExtractWithPrefix(filename, root string, keepList, nonInstallList map[string]struct{}, upgrade bool, logPrefix string, out, errOut io.Writer) error {
 	if out == nil {
 		out = io.Discard
 	}
 	if errOut == nil {
 		errOut = io.Discard
+	}
+	if logPrefix == "" {
+		logPrefix = "kpm"
 	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
@@ -177,7 +185,7 @@ func Extract(filename, root string, keepList, nonInstallList map[string]struct{}
 		count++
 
 		if _, skip := nonInstallList[archivePath]; skip {
-			fmt.Fprintf(out, "pe: ignoring %s\n", archivePath)
+			fmt.Fprintf(out, "%s: ignoring %s\n", logPrefix, archivePath)
 			continue
 		}
 
@@ -191,7 +199,7 @@ func Extract(filename, root string, keepList, nonInstallList map[string]struct{}
 		}
 
 		if err := extractEntry(ar.tr, hdr, absRoot, realPath, isRootUser); err != nil {
-			fmt.Fprintf(errOut, "pe: could not install %s: %v\n", archivePath, err)
+			fmt.Fprintf(errOut, "%s: could not install %s: %v\n", logPrefix, archivePath, err)
 			if !upgrade {
 				return fmt.Errorf("extract error: %s: %w", archivePath, err)
 			}
@@ -209,7 +217,7 @@ func Extract(filename, root string, keepList, nonInstallList map[string]struct{}
 			if removeRejected {
 				removeEmptyParents(rejectDir, realPath)
 			} else {
-				fmt.Fprintf(out, "pe: rejecting %s, keeping existing version\n", archivePath)
+				fmt.Fprintf(out, "%s: rejecting %s, keeping existing version\n", logPrefix, archivePath)
 			}
 		}
 	}
@@ -312,6 +320,87 @@ func Footprint(filename string, w io.Writer) error {
 	}
 	if count == 0 {
 		return fmt.Errorf("empty package")
+	}
+	return bw.Flush()
+}
+
+// FootprintDir writes a CRUX pkginfo --footprint formatted listing for a directory tree.
+func FootprintDir(dir string, w io.Writer) error {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	bw := bufio.NewWriter(w)
+	type lineItem struct {
+		path string
+		line string
+	}
+	var items []lineItem
+	err = filepath.Walk(absDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == absDir {
+			return nil
+		}
+		rel, err := filepath.Rel(absDir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if info.IsDir() {
+			rel += "/"
+		}
+		var st syscall.Stat_t
+		if err := syscall.Lstat(path, &st); err != nil {
+			return err
+		}
+		typeflag := byte(tar.TypeReg)
+		extra := ""
+		switch st.Mode & syscall.S_IFMT {
+		case syscall.S_IFDIR:
+			typeflag = tar.TypeDir
+		case syscall.S_IFLNK:
+			typeflag = tar.TypeSymlink
+			if target, rerr := os.Readlink(path); rerr == nil {
+				extra = " -> " + target
+			}
+		case syscall.S_IFCHR:
+			typeflag = tar.TypeChar
+			extra = fmt.Sprintf(" (%d, %d)", (st.Rdev>>8)&0xfff, st.Rdev&0xff)
+		case syscall.S_IFBLK:
+			typeflag = tar.TypeBlock
+			extra = fmt.Sprintf(" (%d, %d)", (st.Rdev>>8)&0xfff, st.Rdev&0xff)
+		case syscall.S_IFIFO:
+			typeflag = tar.TypeFifo
+		default:
+			typeflag = tar.TypeReg
+			if info.Size() == 0 {
+				extra = " (EMPTY)"
+			}
+		}
+		var modeStr string
+		if typeflag == tar.TypeSymlink {
+			modeStr = "lrwxrwxrwx"
+		} else {
+			modeStr = formatMode(os.FileMode(st.Mode&0o7777), typeflag)
+		}
+		uname := lookupUser(int(st.Uid), "")
+		gname := lookupGroup(int(st.Gid), "")
+		items = append(items, lineItem{
+			path: rel,
+			line: fmt.Sprintf("%s\t%s/%s\t%s%s\n", modeStr, uname, gname, rel, extra),
+		})
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].path < items[j].path })
+	for _, it := range items {
+		if _, err := bw.WriteString(it.line); err != nil {
+			return err
+		}
 	}
 	return bw.Flush()
 }

@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kryx-linux/pe/internal/ui"
+	"github.com/kryx-linux/kpm/internal/ui"
 )
 
 // Index matches the established index.json schema used for binary package releases,
@@ -100,7 +100,7 @@ func Save(path string, idx Index) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create index directory: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".pe-index-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".kpm-index-*")
 	if err != nil {
 		return fmt.Errorf("create temporary index file: %w", err)
 	}
@@ -222,6 +222,132 @@ func Find(idx Index, name, arch string) (Entry, bool) {
 		}
 	}
 	return Entry{}, false
+}
+
+// FindVersion returns the entry for name matching exact version (either full "<ver>-<rel>"
+// or upstream "<ver>") and arch.
+func FindVersion(idx Index, name, version, arch string) (Entry, bool) {
+	group, ok := idx.Packages[name]
+	if !ok || len(group.Versions) == 0 {
+		return Entry{}, false
+	}
+	for i := len(group.Versions) - 1; i >= 0; i-- {
+		e := group.Versions[i]
+		if arch != "" && e.Arch != "" && e.Arch != "any" && e.Arch != arch {
+			continue
+		}
+		if e.FullVersion() == version || e.Pkgver == version {
+			return e, true
+		}
+	}
+	return Entry{}, false
+}
+
+// FindPreviousVersion returns the highest indexed entry for name strictly older than
+// currentFullVer matching arch, suitable for `kpm downgrade`.
+func FindPreviousVersion(idx Index, name, currentFullVer, arch string) (Entry, bool) {
+	group, ok := idx.Packages[name]
+	if !ok || len(group.Versions) == 0 {
+		return Entry{}, false
+	}
+	curVer, curRel := splitFullVer(currentFullVer)
+	for i := len(group.Versions) - 1; i >= 0; i-- {
+		e := group.Versions[i]
+		if arch != "" && e.Arch != "" && e.Arch != "any" && e.Arch != arch {
+			continue
+		}
+		if e.FullVersion() == currentFullVer {
+			continue
+		}
+		if CompareVersion(e.Pkgver, e.Pkgrel, curVer, curRel) < 0 {
+			return e, true
+		}
+	}
+	return Entry{}, false
+}
+
+func splitFullVer(full string) (string, string) {
+	if idx := strings.LastIndex(full, "-"); idx > 0 && idx < len(full)-1 {
+		return full[:idx], full[idx+1:]
+	}
+	return full, ""
+}
+
+// SaveRawAtomic writes raw bytes atomically to path with mode 0644.
+func SaveRawAtomic(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create index directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".kpm-index-*")
+	if err != nil {
+		return fmt.Errorf("create temporary index file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temporary index file: %w", err)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("set permissions on temporary index file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temporary index file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("replace repository index %q: %w", path, err)
+	}
+	return nil
+}
+
+// DownloadIndexBytes downloads and parses indexURL without writing it to disk,
+// enabling callers to cryptographically verify the exact payload before atomic commit.
+func DownloadIndexBytes(indexURL string, timeout time.Duration, out io.Writer, styler ui.Styler) ([]byte, Index, error) {
+	if err := ValidateHTTPURL(indexURL); err != nil {
+		return nil, Index{}, err
+	}
+	client := &http.Client{Timeout: effectiveTimeout(timeout)}
+	resp, err := client.Get(indexURL)
+	if err != nil {
+		return nil, Index{}, fmt.Errorf("download index %q: %w", indexURL, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, Index{}, fmt.Errorf("download index %q: unexpected HTTP status %s", indexURL, resp.Status)
+	}
+
+	var reader io.Reader = resp.Body
+	var prog *ui.Progress
+	if out != nil {
+		prog = ui.NewProgress(out, styler, "syncing index.json", resp.ContentLength)
+		reader = io.TeeReader(resp.Body, prog)
+	}
+
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		if prog != nil {
+			prog.Fail()
+		}
+		return nil, Index{}, fmt.Errorf("read index %q: %w", indexURL, err)
+	}
+	var idx Index
+	if err := json.Unmarshal(body, &idx); err != nil {
+		if prog != nil {
+			prog.Fail()
+		}
+		return nil, Index{}, fmt.Errorf("parse remote index %q: %w", indexURL, err)
+	}
+	if idx.SchemaVersion == 0 {
+		idx.SchemaVersion = 1
+	}
+	if idx.Packages == nil {
+		idx.Packages = make(map[string]Package)
+	}
+	if prog != nil {
+		prog.Finish(fmt.Sprintf("[%d packages]", len(idx.Packages)))
+	}
+	return body, idx, nil
 }
 
 // SortedNames returns all package names in idx sorted lexicographically.
@@ -452,7 +578,7 @@ func downloadFile(rawURL, destPath, label string, expectedSize int64, expectedSH
 	}
 	prog := ui.NewProgress(out, styler, "downloading "+label, total)
 
-	tmp, err := os.CreateTemp(filepath.Dir(destPath), ".pe-dl-*")
+	tmp, err := os.CreateTemp(filepath.Dir(destPath), ".kpm-dl-*")
 	if err != nil {
 		prog.Fail()
 		return fmt.Errorf("create temp download file: %w", err)

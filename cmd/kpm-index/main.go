@@ -1,4 +1,4 @@
-// Command pe-index generates or updates index.json from CRUX .pkg.tar.<ext> archives
+// Command kpm-index generates or updates index.json from CRUX .pkg.tar.<ext> archives
 // for kryx-linux/ports rolling-x86_64 releases.
 package main
 
@@ -13,32 +13,51 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/kryx-linux/pe/internal/archive"
-	"github.com/kryx-linux/pe/internal/ports"
-	"github.com/kryx-linux/pe/internal/repo"
+	"github.com/kryx-linux/kpm/internal/archive"
+	"github.com/kryx-linux/kpm/internal/ports"
+	"github.com/kryx-linux/kpm/internal/repo"
+	"github.com/kryx-linux/kpm/internal/signing"
 )
 
 func main() {
-	fs := flag.NewFlagSet("pe-index", flag.ExitOnError)
+	fs := flag.NewFlagSet("kpm-index", flag.ExitOnError)
 	indexPath := fs.String("index", "index.json", "JSON index to create or update")
 	packagesDir := fs.String("packages", ".", "directory containing CRUX .pkg.tar.<ext> archives")
 	portsDir := fs.String("ports", "", "optional CRUX ports directory to enrich descriptions and dependencies")
+	portsDirAlt := fs.String("ports-dir", "", "alias for --ports")
 	baseURL := fs.String("base-url", "", "base URL for package downloads (e.g. https://github.com/kryx-linux/ports/releases/download/rolling-x86_64)")
 	arch := fs.String("arch", defaultArch(), "package architecture")
 	prune := fs.Bool("prune", false, "remove index entries whose archives are no longer present in --packages")
+	signKey := fs.String("sign-key", "", "optional signify/Ed25519 private key path to generate signify-compatible <index>.sig")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 
-	if err := runIndex(*indexPath, *packagesDir, *portsDir, *baseURL, *arch, *prune, os.Stderr); err != nil {
+	effPorts := strings.TrimSpace(*portsDirAlt)
+	if effPorts == "" {
+		effPorts = strings.TrimSpace(*portsDir)
+	}
+	if effPorts == "" {
+		if env := strings.TrimSpace(os.Getenv("KRYX_PORTS_DIR")); env != "" {
+			effPorts = env
+		} else if env := strings.TrimSpace(os.Getenv("KPM_PORTS_DIR")); env != "" {
+			effPorts = env
+		}
+	}
+
+	if err := runIndexWithSign(*indexPath, *packagesDir, effPorts, *baseURL, *arch, *prune, *signKey, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
 func runIndex(indexPath, packagesDir, portsDir, baseURL, arch string, prune bool, stderr io.Writer) error {
+	return runIndexWithSign(indexPath, packagesDir, portsDir, baseURL, arch, prune, "", stderr)
+}
+
+func runIndexWithSign(indexPath, packagesDir, portsDir, baseURL, arch string, prune bool, signKey string, stderr io.Writer) error {
 	if baseURL != "" {
 		if err := repo.ValidateHTTPURL(baseURL); err != nil {
 			return err
@@ -125,7 +144,18 @@ func runIndex(indexPath, packagesDir, portsDir, baseURL, arch string, prune bool
 		fmt.Fprintf(stderr, "warning: no valid CRUX package archives found in %q; existing index versions were preserved\n", packagesDir)
 	}
 
-	return repo.Save(indexPath, idx)
+	if err := repo.Save(indexPath, idx); err != nil {
+		return err
+	}
+	if strings.TrimSpace(signKey) != "" {
+		sigPath := indexPath + ".sig"
+		keyID, err := signing.SignFileSignify(signKey, indexPath, sigPath)
+		if err != nil {
+			return fmt.Errorf("sign %s: %w", indexPath, err)
+		}
+		fmt.Fprintf(stderr, "kpm-index: signed %s -> %s (key-id %s)\n", indexPath, sigPath, keyID)
+	}
+	return nil
 }
 
 func findPackageArchives(dir string) ([]string, error) {

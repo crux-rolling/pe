@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kryx-linux/pe/internal/repo"
+	"github.com/kryx-linux/kpm/internal/repo"
 )
 
 func TestRegistryMismatchLintBuildAndStage(t *testing.T) {

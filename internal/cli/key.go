@@ -11,13 +11,13 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/kryx-linux/pe/internal/config"
-	"github.com/kryx-linux/pe/internal/repo"
-	"github.com/kryx-linux/pe/internal/signing"
+	"github.com/kryx-linux/kpm/internal/config"
+	"github.com/kryx-linux/kpm/internal/repo"
+	"github.com/kryx-linux/kpm/internal/signing"
 )
 
 // cmdKey manages trusted Ed25519 release signing keys under [paths] keys_dir
-// (/etc/pe/keys.d/*.pub), supporting key generation, listing, trusting
+// (/etc/kpm/keys.d/*.pub), supporting key generation, listing, trusting
 // (local file or HTTPS URL for key rotation/repo migration), and revocation.
 func cmdKey(cfg config.Config, args []string, stdout, stderr io.Writer, styles uiContext) error {
 	if len(args) == 0 {
@@ -28,7 +28,7 @@ func cmdKey(cfg config.Config, args []string, stdout, stderr io.Writer, styles u
 	rest := args[1:]
 	keysDir := cfg.Paths.KeysDir
 	if keysDir == "" {
-		keysDir = "/etc/pe/keys.d"
+		keysDir = "/etc/kpm/keys.d"
 	}
 
 	switch sub {
@@ -39,17 +39,26 @@ func cmdKey(cfg config.Config, args []string, stdout, stderr io.Writer, styles u
 	case "gen", "generate":
 		fs := flag.NewFlagSet("key gen", flag.ContinueOnError)
 		fs.SetOutput(stderr)
-		outPrefix := fs.String("out", "kryx-release", "output filename prefix (<prefix>.pub and <prefix>.key)")
+		outPrefix := fs.String("out", "kryx-release", "output filename prefix (<prefix>.pub and <prefix>.key/.sec)")
 		comment := fs.String("comment", "kryx-release-key", "key comment / owner label")
+		signifyFmt := fs.Bool("signify", false, "generate OpenBSD signify-compatible .pub and .sec files")
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
-		pubData, privData, keyID, err := signing.GenerateKeyPair(*comment)
+		var pubData, privData []byte
+		var keyID string
+		var err error
+		pubPath := *outPrefix + ".pub"
+		privPath := *outPrefix + ".key"
+		if *signifyFmt {
+			privPath = *outPrefix + ".sec"
+			pubData, privData, keyID, err = signing.GenerateSignifyKeyPair(*comment)
+		} else {
+			pubData, privData, keyID, err = signing.GenerateKeyPair(*comment)
+		}
 		if err != nil {
 			return err
 		}
-		pubPath := *outPrefix + ".pub"
-		privPath := *outPrefix + ".key"
 		if err := os.MkdirAll(filepath.Dir(pubPath), 0o755); err != nil {
 			return err
 		}
@@ -73,7 +82,7 @@ func cmdKey(cfg config.Config, args []string, stdout, stderr io.Writer, styles u
 			return err
 		}
 		if len(keys) == 0 {
-			fmt.Fprintf(stdout, "No trusted keys in %s (add one with: pe key trust <file-or-url>)\n", keysDir)
+			fmt.Fprintf(stdout, "No trusted keys in %s (add one with: kpm key trust <file-or-url>)\n", keysDir)
 			return nil
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
@@ -96,7 +105,7 @@ func cmdKey(cfg config.Config, args []string, stdout, stderr io.Writer, styles u
 			return err
 		}
 		if fs.NArg() != 1 {
-			return fmt.Errorf("usage: pe key trust [--name <name>] <pubkey-file-or-https-url>")
+			return fmt.Errorf("usage: kpm key trust [--name <name>] <pubkey-file-or-https-url>")
 		}
 		src := fs.Arg(0)
 		var data []byte
@@ -151,7 +160,7 @@ func cmdKey(cfg config.Config, args []string, stdout, stderr io.Writer, styles u
 
 	case "revoke", "rm", "remove":
 		if len(rest) != 1 {
-			return fmt.Errorf("usage: pe key revoke <name-or-keyid>")
+			return fmt.Errorf("usage: kpm key revoke <name-or-keyid>")
 		}
 		target := strings.TrimSuffix(strings.TrimSpace(rest[0]), ".pub")
 		keys, err := signing.LoadKeyring(keysDir)
@@ -176,9 +185,9 @@ func cmdKey(cfg config.Config, args []string, stdout, stderr io.Writer, styles u
 }
 
 func printKeyUsage(w io.Writer) {
-	fmt.Fprint(w, `usage: pe key <subcommand> [options]
+	fmt.Fprint(w, `usage: kpm key <subcommand> [options]
 
-Manage trusted Ed25519 release signing keys in /etc/pe/keys.d/*.pub.
+Manage trusted Ed25519 release signing keys in /etc/kpm/keys.d/*.pub.
 Accepts both kryx-ed25519 and OpenSSH ssh-ed25519 public keys.
 
 Subcommands:
@@ -189,35 +198,33 @@ Subcommands:
 `)
 }
 
-// fetchAndVerifyIndexSig downloads <indexURL>.sig and verifies it against keysDir.
-func fetchAndVerifyIndexSig(indexURL, localIndexPath, keysDir string, timeout time.Duration) (signing.PublicKey, error) {
+// fetchAndVerifyIndexSigBytes downloads <indexURL>.sig and verifies it against
+// raw payload bytes BEFORE the caller commits index.json to disk.
+func fetchAndVerifyIndexSigBytes(indexURL, pubKeyPath, keysDir string, payload []byte, timeout time.Duration) (signing.PublicKey, []byte, error) {
 	sigURL := indexURL + ".sig"
 	if err := repo.ValidateHTTPURL(sigURL); err != nil {
-		return signing.PublicKey{}, err
+		return signing.PublicKey{}, nil, err
 	}
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Get(sigURL)
 	if err != nil {
-		return signing.PublicKey{}, fmt.Errorf("download signature %s: %w", sigURL, err)
+		return signing.PublicKey{}, nil, fmt.Errorf("download signature %s: %w", sigURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return signing.PublicKey{}, fmt.Errorf("signature %s unavailable (HTTP %s); pass --allow-untrusted to bypass during initial key setup", sigURL, resp.Status)
+		return signing.PublicKey{}, nil, fmt.Errorf("signature %s unavailable (HTTP %s); pass --allow-untrusted to bypass during initial key setup", sigURL, resp.Status)
 	}
 	sigBytes, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
 	if err != nil {
-		return signing.PublicKey{}, fmt.Errorf("read signature %s: %w", sigURL, err)
+		return signing.PublicKey{}, nil, fmt.Errorf("read signature %s: %w", sigURL, err)
 	}
-	sigPath := localIndexPath + ".sig"
-	_ = os.WriteFile(sigPath, sigBytes, 0o644)
-
-	keys, err := signing.LoadKeyring(keysDir)
+	keys, err := signing.LoadVerificationKeys(pubKeyPath, keysDir)
 	if err != nil {
-		return signing.PublicKey{}, err
+		return signing.PublicKey{}, nil, err
 	}
-	payload, err := os.ReadFile(localIndexPath)
+	pk, err := signing.VerifyBytes(keys, payload, sigBytes)
 	if err != nil {
-		return signing.PublicKey{}, err
+		return signing.PublicKey{}, nil, err
 	}
-	return signing.VerifyBytes(keys, payload, sigBytes)
+	return pk, sigBytes, nil
 }

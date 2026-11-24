@@ -9,13 +9,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kryx-linux/pe/internal/builder"
-	"github.com/kryx-linux/pe/internal/config"
-	"github.com/kryx-linux/pe/internal/pkgdb"
-	"github.com/kryx-linux/pe/internal/pkgops"
-	"github.com/kryx-linux/pe/internal/ports"
-	"github.com/kryx-linux/pe/internal/repo"
-	"github.com/kryx-linux/pe/internal/ui"
+	"github.com/kryx-linux/kpm/internal/builder"
+	"github.com/kryx-linux/kpm/internal/config"
+	"github.com/kryx-linux/kpm/internal/pkgdb"
+	"github.com/kryx-linux/kpm/internal/pkgops"
+	"github.com/kryx-linux/kpm/internal/ports"
+	"github.com/kryx-linux/kpm/internal/repo"
+	"github.com/kryx-linux/kpm/internal/ui"
 )
 
 // BuildOptions configures a unified kryx-src package build run.
@@ -27,7 +27,7 @@ type BuildOptions struct {
 	WorkRoot        string // Base isolated workspace for cache/sources/work
 	OutDir          string // Directory where built .pkg.tar.<ext> archives are written
 	Root            string // Target rootfs where build deps (and --install targets) are installed
-	BaseConfigPath  string // Optional pe.ini base config
+	BaseConfigPath  string // Optional kpm.ini base config
 	Repository      string // Binary repo slug (e.g. kryx-linux/ports)
 	ReleaseTag      string // Binary repo release tag (e.g. rolling-x86_64)
 	Arch            string // Target arch (default x86_64)
@@ -62,7 +62,7 @@ type BuildResult struct {
 	MissingDeps   []string
 }
 
-// Build executes a unified xbps-src-style build pipeline using pe's builder,
+// Build executes a unified xbps-src-style build pipeline using kpm's builder,
 // archive, pkgops, and repo internals with canonical Registry port resolution.
 func Build(opts BuildOptions) (BuildResult, error) {
 	if opts.Out == nil {
@@ -356,9 +356,12 @@ func buildConfig(opts BuildOptions) (config.Config, error) {
 	if opts.Root != "" {
 		cfg.Paths.Root = opts.Root
 	}
-	if opts.PortsDir != "" {
-		cfg.Paths.PortsDir = opts.PortsDir
+	resolvedPorts, err := ResolvePortsDir(opts.PortsDir, opts.BaseConfigPath, "")
+	if err != nil {
+		return cfg, err
 	}
+	cfg.Paths.PortsDir = resolvedPorts
+	cfg.Paths.PortsDirs = nil
 	// Empty Collections means auto-discover all collections in PortsDir.
 	cfg.Paths.Collections = opts.Collections
 

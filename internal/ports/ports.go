@@ -308,7 +308,7 @@ func findByPkgfileName(portsDir string, collections []string, target string) (st
 }
 
 // FindGroup expands target into all nested ports when target is a collection/directory
-// under portsDir containing one or more Pkgfiles (e.g. `pe build gports` where gports/
+// under portsDir containing one or more Pkgfiles (e.g. `kpm build gports` where gports/
 // holds multiple sub-ports). Returns nil, nil if target is not a directory with nested ports.
 func FindGroup(portsDir, target string) ([]Port, error) {
 	target = strings.TrimSpace(target)
@@ -721,7 +721,7 @@ func SyncPorts(portsDir, confDir, driversDir string, collections []string, out, 
 				}
 			}
 			if !matched {
-				fmt.Fprintf(errOut, "pe: ports collection %q not found in %s\n", col, confDir)
+				fmt.Fprintf(errOut, "kpm: ports collection %q not found in %s\n", col, confDir)
 			}
 		}
 	} else {

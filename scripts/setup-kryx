@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # setup-kryx - Interactive TUI installer for KryX Linux (dialog + plain-terminal fallback).
-# Supports Online KryX binary repo (pe) and Hybrid CRUX ISO (/media/crux) + KryX overlay.
+# Supports Online KryX binary repo (kpm) and Hybrid CRUX ISO (/media/crux) + KryX overlay.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,7 +9,7 @@ VERSION="rolling"
 SETUP_BIN="$(command -v setup 2>/dev/null || echo "${SCRIPT_DIR}/setup")"
 SETUP_REPO_BIN="$(command -v setup-repo 2>/dev/null || echo "${SCRIPT_DIR}/setup-repo")"
 SETUP_CHROOT_BIN="$(command -v setup-chroot 2>/dev/null || echo "${SCRIPT_DIR}/setup-chroot")"
-PE_BIN="$(command -v pe 2>/dev/null || echo /usr/bin/pe)"
+KPM_BIN="$(command -v kpm 2>/dev/null || echo /usr/bin/kpm)"
 
 TARGET_ROOT="/mnt"
 MODE="online"
@@ -36,7 +36,7 @@ Options:
   --iso-dir <dir>       Pre-fill CRUX ISO media directory (default: /media/crux)
   --repo <owner/repo>   Pre-fill binary repository slug (default: kryx-linux/ports)
   --tag <tag>           Pre-fill release tag (default: rolling-x86_64)
-  --pe-bin <path>       Path to static pe binary (default: auto-detected)
+  --kpm-bin <path>       Path to static kpm binary (default: auto-detected)
   -h, --help            Show this help message
 EOF
 }
@@ -48,7 +48,7 @@ while [[ $# -gt 0 ]]; do
         --iso-dir)  ISO_DIR="$2"; shift 2 ;;
         --repo)     REPO_SLUG="$2"; shift 2 ;;
         --tag)      RELEASE_TAG="$2"; shift 2 ;;
-        --pe-bin)   PE_BIN="$2"; shift 2 ;;
+        --kpm-bin)   KPM_BIN="$2"; shift 2 ;;
         -h|--help)  usage; exit 0 ;;
         *)          echo "setup-kryx: unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -146,7 +146,7 @@ ui_menu() {
 # --- Installer Flow ---
 
 if ! ui_yesno "Welcome to KryX Linux" \
-"Welcome to the KryX Linux interactive installer.\n\nBefore continuing, ensure your target root partition is formatted and mounted (for example at /mnt).\n\nKryX stays minimal out of the box while giving you turnkey binary installs (pe) and source builds (kryx-src/gports).\n\nProceed with setup?"; then
+"Welcome to the KryX Linux interactive installer.\n\nBefore continuing, ensure your target root partition is formatted and mounted (for example at /mnt).\n\nKryX stays minimal out of the box while giving you turnkey binary installs (kpm) and source builds (kryx-src/gports).\n\nProceed with setup?"; then
     echo "Installation aborted."
     exit 0
 fi
@@ -160,10 +160,10 @@ while true; do
     ui_msg "Invalid Root" "Directory '${TARGET_ROOT}' does not exist or is '/'. Mount your target partition (e.g. /mnt) and try again."
 done
 
-# 2. Installation mode (Online pe vs Hybrid CRUX ISO + KryX overlay)
+# 2. Installation mode (Online kpm vs Hybrid CRUX ISO + KryX overlay)
 MODE="$(ui_menu "Installation Source" "Choose how to install base packages into ${TARGET_ROOT}:" \
     "online" "Online KryX binary repo (${REPO_SLUG} ${RELEASE_TAG})" \
-    "hybrid" "Hybrid: Offline CRUX ISO (/media/crux) + Online KryX pe overlay")" || { echo "Aborted."; exit 1; }
+    "hybrid" "Hybrid: Offline CRUX ISO (/media/crux) + Online KryX kpm overlay")" || { echo "Aborted."; exit 1; }
 
 if [[ "$MODE" == "hybrid" ]]; then
     ISO_DIR="$(ui_input "CRUX ISO Package Directory" "Enter path to mounted CRUX media containing core/ (e.g. /media/crux):" "$ISO_DIR")" || { echo "Aborted."; exit 1; }
@@ -171,9 +171,9 @@ fi
 
 # 3. Profile selection
 PROFILE="$(ui_menu "Package Profile" "Select a KryX Linux package profile:" \
-    "minimal" "Barebones rootfs + pe + gports (smallest footprint)" \
+    "minimal" "Barebones rootfs + kpm + gports (smallest footprint)" \
     "base"    "Bootable minimal system + kernel + networking (Recommended)" \
-    "devel"   "Base + full C/C++/Go toolchain ready for pe build / kryx-src")" || { echo "Aborted."; exit 1; }
+    "devel"   "Base + full C/C++/Go toolchain ready for kpm build / kryx-src")" || { echo "Aborted."; exit 1; }
 
 # 4. Repository, hostname, timezone, extra packages
 REPO_SLUG="$(ui_input "Binary Repository" "GitHub repository slug hosting rolling binaries:" "$REPO_SLUG")" || { echo "Aborted."; exit 1; }
@@ -197,7 +197,7 @@ fi
 
 clear 2>/dev/null || true
 
-# 6. Hybrid mode: install offline CRUX core archives first via static `pe --root`
+# 6. Hybrid mode: install offline CRUX core archives first via static `kpm --root`
 if [[ "$MODE" == "hybrid" ]]; then
     if [[ ! -d "${ISO_DIR}/core" ]]; then
         echo "setup-kryx: error: ${ISO_DIR}/core not found" >&2
@@ -211,7 +211,7 @@ if [[ "$MODE" == "hybrid" ]]; then
         echo "setup-kryx: error: no .pkg.tar.* archives found in ${ISO_DIR}/core" >&2
         exit 1
     fi
-    "$PE_BIN" --root "$TARGET_ROOT" install --reinstall --force "${ISO_PKGS[@]}"
+    "$KPM_BIN" --root "$TARGET_ROOT" install --reinstall --force "${ISO_PKGS[@]}"
 fi
 
 # 7. Run unified KryX `setup` for repo config, online overlay packages, and baseline /etc files
@@ -223,7 +223,7 @@ SETUP_ARGS=(
     --tag "$RELEASE_TAG"
     --hostname "$HOSTNAME_VAL"
     --timezone "$TIMEZONE"
-    --pe-bin "$PE_BIN"
+    --kpm-bin "$KPM_BIN"
     --yes
 )
 [[ -n "$EXTRA_PKGS" ]] && SETUP_ARGS+=(--extra "$EXTRA_PKGS")

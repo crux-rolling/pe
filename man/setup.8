@@ -10,7 +10,7 @@ bootstraps a KryX Linux installation into a mounted target root directory
 (default
 .IR /mnt )
 using the static
-.BR pe (8)
+.BR kpm (8)
 binary.
 Because it has no TUI or distro\-specific dependencies, it runs cleanly from any
 x86_64 live Linux ISO (including CRUX, Arch, Debian, Fedora, and Alpine live
@@ -30,7 +30,7 @@ Mounted target root filesystem directory (default:
 Package set to install:
 .BR minimal
 (barebones rootfs +
-.B pe
+.B kpm
 +
 .BR gports ),
 .BR base
@@ -69,15 +69,15 @@ linked to
 .TP
 .B \-\-key \fIfile|url\fR
 Optional Ed25519 public key trusted via
-.B pe key trust
+.B kpm key trust
 and enabling
 .B verify_signature = true
 in
-.IR pe.ini .
+.IR kpm.ini .
 .TP
-.B \-\-pe\-bin \fIpath\fR
+.B \-\-kpm\-bin \fIpath\fR
 Explicit path to the static
-.B pe
+.B kpm
 binary.
 .TP
 .B \-\-dry\-run
@@ -97,5 +97,5 @@ setup \-\-root /mnt \-\-profile devel \-\-extra "vim tmux" \-\-yes
 .BR setup\-kryx (8),
 .BR setup\-chroot (8),
 .BR setup\-repo (8),
-.BR pe (8),
+.BR kpm (8),
 .BR gports (8)

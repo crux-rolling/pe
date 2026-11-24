@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/kryx-linux/pe/internal/repo"
+	"github.com/kryx-linux/kpm/internal/repo"
 )
 
 func TestRunIndexCRUXArchivesAndPrune(t *testing.T) {

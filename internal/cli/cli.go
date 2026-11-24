@@ -1,4 +1,4 @@
-// Package cli implements the unified pe command-line interface for CRUX Linux:
+// Package cli implements the unified kpm command-line interface for CRUX Linux:
 // sync, update, install, build, search, list, and remove/uninstall.
 package cli
 
@@ -16,14 +16,15 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/kryx-linux/pe/internal/archive"
-	"github.com/kryx-linux/pe/internal/builder"
-	"github.com/kryx-linux/pe/internal/config"
-	"github.com/kryx-linux/pe/internal/pkgdb"
-	"github.com/kryx-linux/pe/internal/pkgops"
-	"github.com/kryx-linux/pe/internal/ports"
-	"github.com/kryx-linux/pe/internal/repo"
-	"github.com/kryx-linux/pe/internal/ui"
+	"github.com/kryx-linux/kpm/internal/archive"
+	"github.com/kryx-linux/kpm/internal/builder"
+	"github.com/kryx-linux/kpm/internal/config"
+	"github.com/kryx-linux/kpm/internal/pkgdb"
+	"github.com/kryx-linux/kpm/internal/pkgops"
+	"github.com/kryx-linux/kpm/internal/ports"
+	"github.com/kryx-linux/kpm/internal/repo"
+	"github.com/kryx-linux/kpm/internal/state"
+	"github.com/kryx-linux/kpm/internal/ui"
 )
 
 // Version is injected at link time via -ldflags.
@@ -41,12 +42,12 @@ type uiContext struct {
 	err ui.Styler
 }
 
-// Run executes the pe CLI with standard production runtime options.
+// Run executes the kpm CLI with standard production runtime options.
 func Run(args []string, stdout, stderr io.Writer) int {
 	return RunWithOptions(args, stdout, stderr, RuntimeOptions{})
 }
 
-// RunWithOptions executes the pe CLI with explicit runtime options.
+// RunWithOptions executes the kpm CLI with explicit runtime options.
 func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) int {
 	if stdout == nil {
 		stdout = io.Discard
@@ -58,11 +59,11 @@ func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) 
 	globalFlags, rest, err := parseGlobalArgs(args)
 	if err != nil {
 		es := ui.NewStyler(ui.ColorAuto, stderr)
-		fmt.Fprintf(stderr, "%s %v\n", es.BoldRed("pe:"), err)
+		fmt.Fprintf(stderr, "%s %v\n", es.BoldRed("kpm:"), err)
 		return 2
 	}
 	if globalFlags.showVersion {
-		fmt.Fprintf(stdout, "pe %s\n", Version)
+		fmt.Fprintf(stdout, "kpm %s\n", Version)
 		return 0
 	}
 	if globalFlags.showHelp || len(rest) == 0 {
@@ -74,12 +75,16 @@ func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) 
 	}
 
 	cfgPath := config.ResolvePath(globalFlags.configPath)
-	explicitCfg := strings.TrimSpace(globalFlags.configPath) != "" || strings.TrimSpace(os.Getenv("PE_CONFIG")) != ""
+	explicitCfg := strings.TrimSpace(globalFlags.configPath) != "" || strings.TrimSpace(os.Getenv("KPM_CONFIG")) != ""
 	cfg, err := config.Load(cfgPath, explicitCfg)
 	if err != nil {
 		es := ui.NewStyler(globalFlags.colorMode, stderr)
-		fmt.Fprintf(stderr, "%s %v\n", es.BoldRed("pe:"), err)
+		fmt.Fprintf(stderr, "%s %v\n", es.BoldRed("kpm:"), err)
 		return 1
+	}
+	if envPorts := strings.TrimSpace(os.Getenv("KPM_PORTS_DIR")); envPorts != "" {
+		cfg.Paths.PortsDir = envPorts
+		cfg.Paths.PortsDirs = nil
 	}
 	if strings.TrimSpace(globalFlags.rootOverride) != "" {
 		cfg.Paths.Root = globalFlags.rootOverride
@@ -108,28 +113,44 @@ func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) 
 		runErr = cmdBuild(cfg, cmdArgs, stdout, stderr, rt, styles)
 	case "search", "se", "s":
 		runErr = cmdSearch(cfg, cmdArgs, stdout, stderr, styles)
+	case "info", "show":
+		runErr = cmdInfo(cfg, cmdArgs, stdout, stderr, styles)
 	case "list", "ls", "l":
 		runErr = cmdList(cfg, cmdArgs, stdout, stderr, styles)
 	case "remove", "uninstall", "rm", "r":
 		runErr = cmdRemove(cfg, cmdArgs, stdout, stderr, rt, styles)
-	case "doctor", "check":
+	case "autoremove", "ar":
+		runErr = cmdAutoremove(cfg, cmdArgs, stdout, stderr, rt, styles)
+	case "clean":
+		runErr = cmdClean(cfg, cmdArgs, stdout, stderr, styles)
+	case "check":
+		runErr = cmdCheck(cfg, cmdArgs, stdout, stderr, styles)
+	case "doctor":
 		runErr = cmdDoctor(cfg, cmdArgs, stdout, stderr, styles)
+	case "hold":
+		runErr = cmdHold(cfg, cmdArgs, stdout, stderr, styles)
+	case "unhold":
+		runErr = cmdUnhold(cfg, cmdArgs, stdout, stderr, styles)
+	case "downgrade":
+		runErr = cmdDowngrade(cfg, cmdArgs, stdout, stderr, rt, styles)
+	case "rejected", "rejmerge":
+		runErr = cmdRejected(cfg, cmdArgs, stdout, stderr, styles)
 	case "key":
 		runErr = cmdKey(cfg, cmdArgs, stdout, stderr, styles)
 	case "help", "h", "-h", "--help":
 		printUsage(stdout)
 		return 0
 	case "version", "-v", "--version":
-		fmt.Fprintf(stdout, "pe %s\n", Version)
+		fmt.Fprintf(stdout, "kpm %s\n", Version)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "%s unknown command %q\n\n", styles.err.BoldRed("pe:"), cmd)
+		fmt.Fprintf(stderr, "%s unknown command %q\n\n", styles.err.BoldRed("kpm:"), cmd)
 		printUsage(stderr)
 		return 2
 	}
 
 	if runErr != nil {
-		fmt.Fprintf(stderr, "%s %v\n", styles.err.BoldRed("pe:"), runErr)
+		fmt.Fprintf(stderr, "%s %v\n", styles.err.BoldRed("kpm:"), runErr)
 		return 1
 	}
 	return 0
@@ -204,10 +225,10 @@ func parseGlobalArgs(args []string) (globalOpts, []string, error) {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprint(w, `usage: pe [global options] <command> [options] [args...]
+	fmt.Fprint(w, `usage: kpm [global options] <command> [options] [args...]
 
 Global options:
-  -c, --config <file>     path to pe.ini configuration file (default: /etc/pe.ini)
+  -c, --config <file>     path to kpm.ini configuration file (default: /etc/kpm.ini)
   -r, --root <path>       specify alternative CRUX installation root
       --color <mode>      colorize output: auto, always, or never (default: auto)
       --no-color          disable colored output (same as --color=never)
@@ -215,15 +236,22 @@ Global options:
   -h, --help              print help and exit
 
 Commands (with short aliases):
-  sync, sy                sync binary index.json from kryx-linux/ports rolling-x86_64 (and optional -p/--ports)
-  update, upgrade, up     upgrade installed packages binary-first (installs newly added runtime deps too)
-  install, in, i          install binary package(s) from index.json or local .pkg.tar.<ext> archive
-  build, bld, b           build package(s) from local CRUX Pkgfile ports using pe.ini settings
+  sync, sy                sync binary index.json (with optional signify/Ed25519 verify and -p/--ports)
+  update, upgrade, up     upgrade installed packages binary-first (respects held packages)
+  install, in, i          install binary package(s) (<pkg>[=<ver>]) or local .pkg.tar.<ext> archive
+  downgrade               roll back an installed package to a previous cached/indexed version
+  build, bld, b           build package(s) from local CRUX Pkgfile ports using kpm.ini settings
   search, se, s           short-form search across binary index, local ports, and installed packages
+  info, show              display detailed package metadata, dependencies, and reverse dependencies
   list, ls, l             list installed packages, ports (-p), binaries (-b), files (-f), owners (-o), or diff (-d)
-  remove, rm, r, uninstall  remove installed package(s) using CRUX pkgrm policy
-  doctor, check           check PATH shadowing (/sbin/pe), pkgdb, config, CA certs, ports, and index health
-  key                     manage trusted Ed25519 release signing keys (gen, list, trust, revoke)
+  remove, rm, r, uninstall  remove installed package(s) with reverse-dependency check (-f/--force overrides)
+  autoremove, ar          remove orphaned dependency packages no longer required by world packages
+  clean                   prune cached binary archives, partial downloads, and stale sources
+  hold / unhold           pin or unpin packages to skip during 'kpm update'
+  rejected, rejmerge      inspect, diff, keep, upgrade, or merge files in /var/lib/pkg/rejected/
+  check                   verify system health (--broken for ELF revdep, --files for pkgdb integrity)
+  doctor                  check PATH shadowing, pkgdb, config, CA certs, ports, and index health
+  key                     manage trusted signify/Ed25519 release signing keys (gen, list, trust, revoke)
 `)
 }
 
@@ -234,7 +262,7 @@ func cmdSync(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 	fs.SetOutput(stderr)
 	syncPorts := fs.Bool("ports", false, "also sync CRUX ports collections via /etc/ports/drivers")
 	syncPortsShort := fs.Bool("p", false, "also sync CRUX ports collections via /etc/ports/drivers")
-	verifySig := fs.Bool("verify", false, "require Ed25519 signature verification of index.json.sig")
+	verifySig := fs.Bool("verify", false, "require signify/Ed25519 signature verification of index.json.sig")
 	allowUntrusted := fs.Bool("allow-untrusted", false, "bypass signature verification (for initial setup or key migration)")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
@@ -244,23 +272,32 @@ func cmdSync(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 	for _, r := range repos {
 		timeout := time.Duration(r.TimeoutSeconds) * time.Second
 		idxPath := cfg.RepoIndexPath(r.Name)
-		idx, err := repo.SyncWithLog(r.IndexURL, idxPath, timeout, stdout, styles.out)
+		rawBytes, idx, err := repo.DownloadIndexBytes(r.IndexURL, timeout, stdout, styles.out)
 		if err != nil {
-			if errors.Is(err, os.ErrPermission) {
-				return fmt.Errorf("%w (run with sudo or configure cache_dir in pe.ini)", err)
-			}
 			return fmt.Errorf("sync repo %s: %w", r.Name, err)
 		}
 
 		needVerify := (*verifySig || r.VerifySignature) && !*allowUntrusted
+		var sigBytes []byte
 		if needVerify {
-			pk, verr := fetchAndVerifyIndexSig(r.IndexURL, idxPath, cfg.Paths.KeysDir, timeout)
+			pk, fetchedSig, verr := fetchAndVerifyIndexSigBytes(r.IndexURL, r.PubKey, cfg.Paths.KeysDir, rawBytes, timeout)
 			if verr != nil {
-				_ = os.Remove(idxPath)
 				return fmt.Errorf("signature verification failed for repo %s: %w", r.Name, verr)
 			}
+			sigBytes = fetchedSig
 			fmt.Fprintf(stdout, "%s verified %s signature with key %s (%s)\n",
 				styles.out.BoldGreen("==>"), r.Name, styles.out.Bold(pk.KeyID), pk.Name)
+		}
+
+		// Atomically replace cached index.json ONLY after signature verification succeeds.
+		if err := repo.SaveRawAtomic(idxPath, rawBytes); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				return fmt.Errorf("%w (run with sudo or configure cache_dir in kpm.ini)", err)
+			}
+			return fmt.Errorf("sync repo %s: %w", r.Name, err)
+		}
+		if len(sigBytes) > 0 {
+			_ = repo.SaveRawAtomic(idxPath+".sig", sigBytes)
 		}
 
 		label := r.Repository
@@ -307,7 +344,7 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 
 	targets := fs.Args()
 	if len(targets) == 0 {
-		return fmt.Errorf("usage: pe install [-u|--upgrade] [-R|--reins|--reinstall] [-f|--force] [-d|--deps] [-v|--verbose] <package|file...>")
+		return fmt.Errorf("usage: kpm install [-u|--upgrade] [-R|--reins|--reinstall] [-f|--force] [-d|--deps] [-v|--verbose] <package|file...>")
 	}
 
 	doUpgrade := *upgrade || *upgradeShort
@@ -345,6 +382,7 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 		if err != nil {
 			return err
 		}
+		_ = state.AddToWorld(cfg.Paths.Root, name)
 		fmt.Fprintf(stdout, "%s %s %s\n", styles.out.BoldGreen("installed"), styles.out.Bold(name), styles.out.Cyan(ver))
 	}
 
@@ -352,10 +390,23 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 		return nil
 	}
 
-	// Load synced binary index (strictly binary-first).
-	idx, err := loadLocalIndex(cfg)
-	if err != nil {
-		return err
+	// Parse optional <pkg>=<ver> pins while tracking explicit requested targets for world file.
+	pinnedVersions := make(map[string]string)
+	explicitSet := make(map[string]bool, len(pkgNames))
+	bareNames := make([]string, 0, len(pkgNames))
+	for _, spec := range pkgNames {
+		name, ver := parsePkgVersionSpec(spec)
+		bareNames = append(bareNames, name)
+		explicitSet[name] = true
+		if ver != "" {
+			pinnedVersions[name] = ver
+		}
+	}
+
+	// Load synced binary index (strictly binary-first; allow cached-only versioned installs if index absent).
+	idx, idxErr := loadLocalIndex(cfg)
+	if idxErr != nil && len(pinnedVersions) == 0 {
+		return idxErr
 	}
 
 	// Read currently installed packages if resolving dependencies.
@@ -366,21 +417,42 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 		}
 	}
 
-	installPlan := pkgNames
+	installPlan := bareNames
 	if doDeps {
-		installPlan = resolveBinaryDeps(cfg, idx, pkgNames, installedMap)
+		installPlan = resolveBinaryDeps(cfg, idx, bareNames, installedMap)
 	}
 
-	// Verify all requested packages exist in binary index before modifying the system.
+	type resolvedInstall struct {
+		name       string
+		entry      repo.Entry
+		cachedPath string
+		explicit   bool
+	}
+
+	// Verify all requested packages exist in binary index (or local bin cache for pinned versions)
+	// before modifying the system.
 	var missing []string
-	entries := make([]repo.Entry, 0, len(installPlan))
+	resolvedItems := make([]resolvedInstall, 0, len(installPlan))
 	for _, name := range installPlan {
+		wantVer := pinnedVersions[name]
+		if wantVer != "" {
+			if entry, ok := repo.FindVersion(idx, name, wantVer, cfg.Repo.Arch); ok {
+				resolvedItems = append(resolvedItems, resolvedInstall{name: name, entry: entry, explicit: explicitSet[name]})
+				continue
+			}
+			if cached, ok := findCachedBinaryVersion(cfg.BinaryCacheDir(), name, wantVer); ok {
+				resolvedItems = append(resolvedItems, resolvedInstall{name: name, cachedPath: cached, explicit: explicitSet[name]})
+				continue
+			}
+			missing = append(missing, name+"="+wantVer)
+			continue
+		}
 		entry, ok := repo.Find(idx, name, cfg.Repo.Arch)
 		if !ok {
 			missing = append(missing, name)
 			continue
 		}
-		entries = append(entries, entry)
+		resolvedItems = append(resolvedItems, resolvedInstall{name: name, entry: entry, explicit: explicitSet[name]})
 	}
 	if len(missing) > 0 {
 		for _, m := range missing {
@@ -389,23 +461,32 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 				styles.err.Bold(m),
 				cfg.Repo.Repository,
 				cfg.Repo.Tag,
-				styles.err.Bold("pe build "+m),
+				styles.err.Bold("kpm build "+m),
 			)
 		}
-		return fmt.Errorf("binary package(s) unavailable: %s (run `pe build <pkg>` to compile from ports)", strings.Join(missing, ", "))
+		return fmt.Errorf("binary package(s) unavailable: %s (run `kpm build <pkg>` to compile from ports)", strings.Join(missing, ", "))
 	}
 
 	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
-	for _, entry := range entries {
-		localPath, err := repo.FetchBinaryWithStyle(entry, cfg.BinaryCacheDir(), timeout, stdout, styles.out)
-		if err != nil {
-			return err
+	for _, item := range resolvedItems {
+		localPath := item.cachedPath
+		if localPath == "" {
+			p, err := repo.FetchBinaryWithStyle(item.entry, cfg.BinaryCacheDir(), timeout, stdout, styles.out)
+			if err != nil {
+				return err
+			}
+			localPath = p
+		}
+		itemReinstall := doReinstall
+		if pinnedVersions[item.name] != "" && !doUpgrade && !doReinstall {
+			// Installing an explicit pinned version upgrades/replaces if already installed.
+			itemReinstall = true
 		}
 		name, ver, err := pkgops.InstallArchive(localPath, pkgops.InstallOptions{
 			Root:          cfg.Paths.Root,
 			PkgaddConf:    cfg.Paths.PkgaddConf,
 			Upgrade:       doUpgrade,
-			Reinstall:     doReinstall,
+			Reinstall:     itemReinstall,
 			Force:         doForce,
 			Verbose:       doVerbose,
 			SkipRootCheck: rt.SkipRootCheck,
@@ -415,6 +496,9 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 		})
 		if err != nil {
 			return err
+		}
+		if item.explicit {
+			_ = state.AddToWorld(cfg.Paths.Root, name)
 		}
 		fmt.Fprintf(stdout, "%s %s %s\n", styles.out.BoldGreen("installed"), styles.out.Bold(name), styles.out.Cyan(ver))
 	}
@@ -434,6 +518,7 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 	noSyncShort := fs.Bool("n", false, "use cached index.json without syncing first")
 	dryRun := fs.Bool("dry-run", false, "show available updates without installing")
 	dryRunShort := fs.Bool("d", false, "show available updates without installing")
+	ignoreHold := fs.Bool("ignore-hold", false, "upgrade held/pinned packages as well")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
@@ -444,10 +529,26 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 		idx, err = loadLocalIndex(cfg)
 	} else {
 		timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
-		idx, err = repo.SyncWithLog(cfg.Repo.IndexURL, cfg.LocalIndexPath(), timeout, stdout, styles.out)
-		if err != nil && errors.Is(err, os.ErrPermission) {
-			err = fmt.Errorf("%w (run with sudo or configure cache_dir in pe.ini)", err)
+		rawBytes, syncedIdx, serr := repo.DownloadIndexBytes(cfg.Repo.IndexURL, timeout, stdout, styles.out)
+		if serr != nil {
+			return serr
 		}
+		if cfg.Repo.VerifySignature {
+			pk, sigBytes, verr := fetchAndVerifyIndexSigBytes(cfg.Repo.IndexURL, cfg.Repo.PubKey, cfg.Paths.KeysDir, rawBytes, timeout)
+			if verr != nil {
+				return fmt.Errorf("signature verification failed: %w", verr)
+			}
+			fmt.Fprintf(stdout, "%s verified index signature with key %s (%s)\n",
+				styles.out.BoldGreen("==>"), styles.out.Bold(pk.KeyID), pk.Name)
+			_ = repo.SaveRawAtomic(cfg.LocalIndexPath()+".sig", sigBytes)
+		}
+		if err = repo.SaveRawAtomic(cfg.LocalIndexPath(), rawBytes); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				err = fmt.Errorf("%w (run with sudo or configure cache_dir in kpm.ini)", err)
+			}
+			return err
+		}
+		idx = syncedIdx
 	}
 	if err != nil {
 		return err
@@ -457,6 +558,7 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 	if err != nil {
 		return err
 	}
+	heldPkgs, _ := state.LoadHold(cfg.Paths.Root, cfg.Repo.Hold)
 
 	targets := fs.Args()
 	if len(targets) == 0 {
@@ -474,16 +576,29 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 
 	var toUpgrade []repo.Entry
 	var needsBuild []string
+	var skippedHeld int
 
 	for _, name := range targets {
 		instVer := db.Packages[name].Version
 		if entry, ok := repo.Find(idx, name, cfg.Repo.Arch); ok {
 			if entry.FullVersion() != instVer {
+				if heldPkgs[name] && !*ignoreHold {
+					skippedHeld++
+					fmt.Fprintf(stdout, "%s skipping held package %s (%s -> %s); use 'kpm unhold %s' or --ignore-hold to upgrade\n",
+						styles.out.BoldYellow("note:"), styles.out.Bold(name), instVer, entry.FullVersion(), name)
+					continue
+				}
 				toUpgrade = append(toUpgrade, entry)
 			}
 			continue
 		}
 		if p, ok := portMap[name]; ok && p.FullVersion() != instVer {
+			if heldPkgs[name] && !*ignoreHold {
+				skippedHeld++
+				fmt.Fprintf(stdout, "%s skipping held package %s (%s -> %s)\n",
+					styles.out.BoldYellow("note:"), styles.out.Bold(name), instVer, p.FullVersion())
+				continue
+			}
 			needsBuild = append(needsBuild, name)
 			fmt.Fprintf(stderr, "%s no binary available for %s (%s -> %s) in %s (%s); run: %s\n",
 				styles.err.BoldYellow("warning:"),
@@ -492,13 +607,13 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 				p.FullVersion(),
 				cfg.Repo.Repository,
 				cfg.Repo.Tag,
-				styles.err.Bold("pe build "+name),
+				styles.err.Bold("kpm build "+name),
 			)
 		}
 	}
 
 	if len(toUpgrade) == 0 {
-		if len(needsBuild) == 0 {
+		if len(needsBuild) == 0 && skippedHeld == 0 {
 			fmt.Fprintln(stdout, styles.out.Green("all packages are up to date"))
 		}
 		return nil
@@ -585,7 +700,7 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 		if err != nil {
 			return err
 		}
-		if name == "pe" {
+		if name == "kpm" {
 			upgradedSelf = true
 		}
 		fmt.Fprintf(stdout, "%s %s %s -> %s\n",
@@ -596,13 +711,13 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 		)
 	}
 	if upgradedSelf {
-		fmt.Fprintf(stdout, "%s pe was upgraded; run %s in open shells to refresh command path cache\n",
+		fmt.Fprintf(stdout, "%s kpm was upgraded; run %s in open shells to refresh command path cache\n",
 			styles.out.BoldCyan("note:"), styles.out.Bold("hash -r"))
 	}
 	return nil
 }
 
-// --- build (explicit Pkgfile compilation via pe.ini) ---
+// --- build (explicit Pkgfile compilation via kpm.ini) ---
 
 func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt RuntimeOptions, styles uiContext) error {
 	fs := flag.NewFlagSet("build", flag.ContinueOnError)
@@ -643,7 +758,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 
 	targets := fs.Args()
 	if len(targets) == 0 {
-		return fmt.Errorf("usage: pe build [options] <port...>")
+		return fmt.Errorf("usage: kpm build [options] <port...>")
 	}
 
 	doInstall := *install || *installShort
@@ -712,7 +827,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 				hasBinIdx = true
 			} else {
 				fmt.Fprintf(stderr, "%s could not sync index.json (%v); falling back to cached/source deps\n",
-					styles.err.BoldYellow("pe: warning:"), err)
+					styles.err.BoldYellow("kpm: warning:"), err)
 			}
 		}
 		if !hasBinIdx {
@@ -743,7 +858,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 		}
 		if len(missing) > 0 {
 			fmt.Fprintf(stderr, "%s dependencies not found in binary index or ports tree: %s\n",
-				styles.err.BoldYellow("pe: warning:"), strings.Join(missing, ", "))
+				styles.err.BoldYellow("kpm: warning:"), strings.Join(missing, ", "))
 		}
 		plan = resolved
 	} else {
@@ -862,6 +977,7 @@ func cmdBuild(cfg config.Config, args []string, stdout, stderr io.Writer, rt Run
 				return err
 			}
 			installedMap[name] = true
+			_ = state.AddToWorld(cfg.Paths.Root, name)
 			fmt.Fprintf(stdout, "%s %s %s\n", styles.out.BoldGreen("installed"), styles.out.Bold(name), styles.out.Cyan(ver))
 		}
 	}
@@ -892,7 +1008,7 @@ func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer, style
 		return err
 	}
 	if fs.NArg() == 0 {
-		return fmt.Errorf("usage: pe search [-i|--installed|-p|--ports|-b|--binaries] <query>")
+		return fmt.Errorf("usage: kpm search [-i|--installed|-p|--ports|-b|--binaries] <query>")
 	}
 	query := strings.ToLower(strings.Join(fs.Args(), " "))
 
@@ -931,12 +1047,12 @@ func cmdSearch(cfg config.Config, args []string, stdout, stderr io.Writer, style
 				}
 			}
 		} else if errors.Is(err, os.ErrPermission) {
-			fmt.Fprintf(stderr, "%s cannot read %s: permission denied (run `sudo pe sync` to refresh permissions)\n",
-				styles.err.BoldYellow("pe: warning:"), idxPath)
+			fmt.Fprintf(stderr, "%s cannot read %s: permission denied (run `sudo kpm sync` to refresh permissions)\n",
+				styles.err.BoldYellow("kpm: warning:"), idxPath)
 		} else if !errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(stderr, "%s cannot load %s: %v\n", styles.err.BoldYellow("pe: warning:"), idxPath, err)
+			fmt.Fprintf(stderr, "%s cannot load %s: %v\n", styles.err.BoldYellow("kpm: warning:"), idxPath, err)
 		} else if fBinaries {
-			return fmt.Errorf("local index %s not found; run `pe sync` first", idxPath)
+			return fmt.Errorf("local index %s not found; run `kpm sync` first", idxPath)
 		}
 	}
 
@@ -1171,7 +1287,7 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 			}
 		}
 		if len(matches) == 0 {
-			fmt.Fprintln(stdout, "pe: no owner(s) found")
+			fmt.Fprintln(stdout, "kpm: no owner(s) found")
 			return nil
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
@@ -1247,13 +1363,45 @@ func cmdList(cfg config.Config, args []string, stdout, stderr io.Writer, styles 
 func cmdRemove(cfg config.Config, args []string, stdout, stderr io.Writer, rt RuntimeOptions, styles uiContext) error {
 	fs := flag.NewFlagSet("remove", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	force := fs.Bool("force", false, "remove even if other installed packages depend on it")
+	forceShort := fs.Bool("f", false, "remove even if other installed packages depend on it")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 	targets := fs.Args()
 	if len(targets) == 0 {
-		return fmt.Errorf("usage: pe remove <package...>")
+		return fmt.Errorf("usage: kpm remove [-f|--force] <package...>")
 	}
+
+	doForce := *force || *forceShort
+	if !doForce {
+		if db, err := openDBReadOnly(cfg.Paths.Root); err == nil {
+			idx, _ := loadLocalIndex(cfg)
+			portMap := discoverPortMap(cfg)
+			revDeps := buildReverseDepMap(db, idx, portMap, cfg.Repo.Arch)
+			removing := make(map[string]bool, len(targets))
+			for _, t := range targets {
+				removing[t] = true
+			}
+			for _, name := range targets {
+				if !db.FindPkg(name) {
+					continue
+				}
+				var blockers []string
+				for _, dependent := range revDeps[name] {
+					if !removing[dependent] {
+						blockers = append(blockers, dependent)
+					}
+				}
+				if len(blockers) > 0 {
+					fmt.Fprintf(stderr, "%s cannot remove %s: required by installed package(s): %s\n",
+						styles.err.BoldYellow("warning:"), styles.err.Bold(name), strings.Join(blockers, ", "))
+					return fmt.Errorf("refusing to remove %s (required by %s); pass --force to override", name, strings.Join(blockers, ", "))
+				}
+			}
+		}
+	}
+
 	for _, name := range targets {
 		if err := pkgops.RemovePackage(name, pkgops.RemoveOptions{
 			Root:          cfg.Paths.Root,
@@ -1263,6 +1411,7 @@ func cmdRemove(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 		}); err != nil {
 			return err
 		}
+		_ = state.RemoveFromWorld(cfg.Paths.Root, name)
 		fmt.Fprintf(stdout, "%s %s\n", styles.out.BoldGreen("removed"), styles.out.Bold(name))
 	}
 	return nil
@@ -1286,10 +1435,10 @@ func loadLocalIndex(cfg config.Config) (repo.Index, error) {
 		idx, err := repo.Load(path)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "no such file") {
-				return repo.Index{}, fmt.Errorf("local index %s not found; run `pe sync` first", path)
+				return repo.Index{}, fmt.Errorf("local index %s not found; run `kpm sync` first", path)
 			}
 			if errors.Is(err, os.ErrPermission) {
-				return repo.Index{}, fmt.Errorf("cannot read local index %s: permission denied (run `sudo pe sync` to refresh permissions)", path)
+				return repo.Index{}, fmt.Errorf("cannot read local index %s: permission denied (run `sudo kpm sync` to refresh permissions)", path)
 			}
 			return repo.Index{}, err
 		}
@@ -1312,7 +1461,7 @@ func loadLocalIndex(cfg config.Config) (repo.Index, error) {
 		}
 	}
 	if !loadedAny {
-		return repo.Index{}, fmt.Errorf("no synced repository indexes found under %s; run `pe sync` first", cfg.Paths.CacheDir)
+		return repo.Index{}, fmt.Errorf("no synced repository indexes found under %s; run `kpm sync` first", cfg.Paths.CacheDir)
 	}
 	return merged, nil
 }
@@ -1470,7 +1619,7 @@ func resolveBinaryDeps(cfg config.Config, idx repo.Index, targets []string, inst
 }
 
 // parseInterspersedFlags allows subcommand flags to appear before or after positional arguments
-// (e.g. `pe install zig --force` works identically to `pe install --force zig`), while preserving
+// (e.g. `kpm install zig --force` works identically to `kpm install --force zig`), while preserving
 // `--` as the end-of-flags delimiter.
 func parseInterspersedFlags(fs *flag.FlagSet, args []string) error {
 	type boolFlagger interface {

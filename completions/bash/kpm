@@ -1,7 +1,7 @@
-# Bash completion for pe and pe-index (CRUX Linux binary-first package manager)
+# Bash completion for kpm and kpm-index (CRUX Linux binary-first package manager)
 # Zero external dependencies (no jq, no bash-completion required).
 
-_pe_ini_get() {
+_kpm_ini_get() {
 	local file="$1" want_sec="$2" want_key="$3"
 	[[ -r "$file" ]] || return 1
 
@@ -50,8 +50,8 @@ _pe_ini_get() {
 	return 1
 }
 
-_pe_resolve_paths() {
-	local cfg_file="${PE_CONFIG:-/etc/pe.ini}"
+_kpm_resolve_paths() {
+	local cfg_file="${KPM_CONFIG:-/etc/kpm.ini}"
 	local root_override=""
 	local i w
 	for (( i = 1; i < cword; i++ )); do
@@ -81,18 +81,18 @@ _pe_resolve_paths() {
 		esac
 	done
 
-	_pe_cfg_root="$(_pe_ini_get "$cfg_file" paths root 2>/dev/null || printf '/')"
-	[[ -n "$root_override" ]] && _pe_cfg_root="$root_override"
-	_pe_cfg_root="${_pe_cfg_root%/}"
+	_kpm_cfg_root="$(_kpm_ini_get "$cfg_file" paths root 2>/dev/null || printf '/')"
+	[[ -n "$root_override" ]] && _kpm_cfg_root="$root_override"
+	_kpm_cfg_root="${_kpm_cfg_root%/}"
 
-	_pe_cfg_ports_dir="$(_pe_ini_get "$cfg_file" paths ports_dir 2>/dev/null || printf '/usr/ports')"
-	_pe_cfg_collections="$(_pe_ini_get "$cfg_file" paths collections 2>/dev/null || printf 'core opt xorg contrib')"
-	_pe_cfg_cache_dir="$(_pe_ini_get "$cfg_file" paths cache_dir 2>/dev/null || printf '/var/cache/pe')"
-	_pe_cfg_ports_conf_dir="$(_pe_ini_get "$cfg_file" paths ports_conf_dir 2>/dev/null || printf '/etc/ports')"
+	_kpm_cfg_ports_dir="$(_kpm_ini_get "$cfg_file" paths ports_dir 2>/dev/null || printf '/usr/ports')"
+	_kpm_cfg_collections="$(_kpm_ini_get "$cfg_file" paths collections 2>/dev/null || printf 'core opt xorg contrib')"
+	_kpm_cfg_cache_dir="$(_kpm_ini_get "$cfg_file" paths cache_dir 2>/dev/null || printf '/var/cache/kpm')"
+	_kpm_cfg_ports_conf_dir="$(_kpm_ini_get "$cfg_file" paths ports_conf_dir 2>/dev/null || printf '/etc/ports')"
 }
 
-_pe_installed_pkgs() {
-	local db="${_pe_cfg_root}/var/lib/pkg/db"
+_kpm_installed_pkgs() {
+	local db="${_kpm_cfg_root}/var/lib/pkg/db"
 	[[ -r "$db" ]] || return 0
 
 	local line state=0
@@ -108,8 +108,8 @@ _pe_installed_pkgs() {
 	done < "$db"
 }
 
-_pe_index_pkgs() {
-	local idx="${_pe_cfg_cache_dir}/index.json"
+_kpm_index_pkgs() {
+	local idx="${_kpm_cfg_cache_dir}/index.json"
 	[[ -r "$idx" ]] || return 0
 
 	local line rest name
@@ -132,11 +132,11 @@ _pe_index_pkgs() {
 	done < "$idx"
 }
 
-_pe_port_names() {
-	local ports_dir="$_pe_cfg_ports_dir"
+_kpm_port_names() {
+	local ports_dir="$_kpm_cfg_ports_dir"
 	[[ -d "$ports_dir" ]] || return 0
 
-	local cols="${_pe_cfg_collections//,/ }"
+	local cols="${_kpm_cfg_collections//,/ }"
 	local old_nullglob
 	old_nullglob=$(shopt -p nullglob)
 	shopt -s nullglob
@@ -182,9 +182,9 @@ _pe_port_names() {
 	eval "$old_nullglob"
 }
 
-_pe_collections_list() {
-	local conf_dir="$_pe_cfg_ports_conf_dir"
-	local ports_dir="$_pe_cfg_ports_dir"
+_kpm_collections_list() {
+	local conf_dir="$_kpm_cfg_ports_conf_dir"
+	local ports_dir="$_kpm_cfg_ports_dir"
 	local old_nullglob
 	old_nullglob=$(shopt -p nullglob)
 	shopt -s nullglob
@@ -217,7 +217,7 @@ _pe_collections_list() {
 	eval "$old_nullglob"
 }
 
-_pe_local_archives() {
+_kpm_local_archives() {
 	local prefix="$1"
 	local old_nullglob
 	old_nullglob=$(shopt -p nullglob)
@@ -234,7 +234,7 @@ _pe_local_archives() {
 	eval "$old_nullglob"
 }
 
-_pe_local_pkgfiles() {
+_kpm_local_pkgfiles() {
 	local prefix="$1"
 	local old_nullglob
 	old_nullglob=$(shopt -p nullglob)
@@ -255,7 +255,7 @@ _pe_local_pkgfiles() {
 	eval "$old_nullglob"
 }
 
-_pe_completions() {
+_kpm_completions() {
 	local cur prev words cword split=false
 	if declare -F _init_completion >/dev/null 2>&1; then
 		_init_completion -s || return
@@ -275,7 +275,7 @@ _pe_completions() {
 	fi
 
 	local global_opts="-c --config -r --root --color --no-color -v --version -h --help"
-	local subcommands="sync sy update up install in i build bld b search se s list ls l remove rm r uninstall help h version"
+	local subcommands="sync sy update upgrade up install in i downgrade build bld b search se s info show list ls l remove rm r uninstall autoremove ar clean check doctor hold unhold rejected rejmerge key help h version"
 
 	# Determine active subcommand (scanning past global options)
 	local cmd="" cmd_idx=0 i w
@@ -297,8 +297,8 @@ _pe_completions() {
 		esac
 	done
 
-	local _pe_cfg_root _pe_cfg_ports_dir _pe_cfg_collections _pe_cfg_cache_dir _pe_cfg_ports_conf_dir
-	_pe_resolve_paths
+	local _kpm_cfg_root _kpm_cfg_ports_dir _kpm_cfg_collections _kpm_cfg_cache_dir _kpm_cfg_ports_conf_dir
+	_kpm_resolve_paths
 
 	# Handle value-taking global options before subcommand
 	if [[ -z "$cmd" ]]; then
@@ -340,7 +340,7 @@ _pe_completions() {
 				COMPREPLY=( $(compgen -W "-p --ports" -- "$cur") )
 				return
 			fi
-			candidates="$(_pe_collections_list)"
+			candidates="$(_kpm_collections_list)"
 			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
 			return
 			;;
@@ -350,7 +350,7 @@ _pe_completions() {
 				COMPREPLY=( $(compgen -W "-f --force -v --verbose -n --no-sync -d --dry-run" -- "$cur") )
 				return
 			fi
-			candidates="$(_pe_installed_pkgs)"
+			candidates="$(_kpm_installed_pkgs)"
 			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
 			return
 			;;
@@ -360,7 +360,7 @@ _pe_completions() {
 				COMPREPLY=( $(compgen -W "-u --upgrade -R --reins --reinstall -f --force -v --verbose -d --deps" -- "$cur") )
 				return
 			fi
-			candidates="$(_pe_index_pkgs)"$'\n'"$(_pe_local_archives "$cur")"
+			candidates="$(_kpm_index_pkgs)"$'\n'"$(_kpm_local_archives "$cur")"
 			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
 			return
 			;;
@@ -370,7 +370,7 @@ _pe_completions() {
 				COMPREPLY=( $(compgen -W "-i --install -u --upgrade -R --reins --reinstall -f --force -d --deps -S --source-deps -if --ignore-footprint -in --ignore-new -uf --update-footprint -im --ignore-md5sum -is --ignore-signature -kw --keep-work -ns --no-strip -v --verbose" -- "$cur") )
 				return
 			fi
-			candidates="$(_pe_port_names)"$'\n'"$(_pe_local_pkgfiles "$cur")"
+			candidates="$(_kpm_port_names)"$'\n'"$(_kpm_local_pkgfiles "$cur")"
 			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
 			return
 			;;
@@ -389,13 +389,13 @@ _pe_completions() {
 				esac
 			done
 			if (( s_inst )); then
-				candidates="$(_pe_installed_pkgs)"
+				candidates="$(_kpm_installed_pkgs)"
 			elif (( s_ports )); then
-				candidates="$(_pe_port_names)"
+				candidates="$(_kpm_port_names)"
 			elif (( s_bins )); then
-				candidates="$(_pe_index_pkgs)"
+				candidates="$(_kpm_index_pkgs)"
 			else
-				candidates="$(_pe_index_pkgs)"$'\n'"$(_pe_port_names)"$'\n'"$(_pe_installed_pkgs)"
+				candidates="$(_kpm_index_pkgs)"$'\n'"$(_kpm_port_names)"$'\n'"$(_kpm_installed_pkgs)"
 			fi
 			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
 			return
@@ -405,7 +405,7 @@ _pe_completions() {
 			if (( ! after_ddash )); then
 				case "$prev" in
 					-f|--files|-files)
-						candidates="$(_pe_installed_pkgs)"$'\n'"$(_pe_local_archives "$cur")"
+						candidates="$(_kpm_installed_pkgs)"$'\n'"$(_kpm_local_archives "$cur")"
 						COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
 						return
 						;;
@@ -423,14 +423,14 @@ _pe_completions() {
 				[[ "${words[i]}" == "--ports" || "${words[i]}" == "-ports" || "${words[i]}" == "-p" ]] && has_ports_flag=1
 			done
 			if (( has_ports_flag )); then
-				candidates="$(_pe_collections_list)"
+				candidates="$(_kpm_collections_list)"
 				COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
 			fi
 			return
 			;;
 
 		remove|uninstall|rm|r)
-			candidates="$(_pe_installed_pkgs)"
+			candidates="$(_kpm_installed_pkgs)"
 			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
 			return
 			;;
@@ -441,7 +441,7 @@ _pe_completions() {
 	esac
 }
 
-_pe_index_completions() {
+_kpm_index_completions() {
 	local cur prev words cword split=false
 	if declare -F _init_completion >/dev/null 2>&1; then
 		_init_completion -s || return
@@ -478,8 +478,8 @@ _pe_index_completions() {
 			;;
 	esac
 
-	COMPREPLY=( $(compgen -W "--index --packages --ports --base-url --arch --prune -h --help" -- "$cur") )
+	COMPREPLY=( $(compgen -W "--index --packages --ports --ports-dir --base-url --arch --prune --sign-key -h --help" -- "$cur") )
 }
 
-complete -F _pe_completions pe
-complete -F _pe_index_completions pe-index
+complete -F _kpm_completions kpm
+complete -F _kpm_index_completions kpm-index

@@ -1,3 +1,3 @@
-module github.com/kryx-linux/pe
+module github.com/kryx-linux/kpm
 
 go 1.24

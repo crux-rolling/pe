@@ -7,22 +7,22 @@ PROFILED ?= $(ETCDIR)/profile.d
 DESTDIR ?=
 
 VERSION ?= 0.5.3
-LDFLAGS := -s -w -X github.com/kryx-linux/pe/internal/cli.Version=$(VERSION)
+LDFLAGS := -s -w -X github.com/kryx-linux/kpm/internal/cli.Version=$(VERSION)
 GO_SRCS := $(shell find cmd internal -type f -name '*.go') go.mod
 
 .PHONY: all build test verify clean install uninstall clean-legacy purge
 
 all: build
 
-build: bin/pe bin/pe-index bin/kryx-src
+build: bin/kpm bin/kpm-index bin/kryx-src
 
-bin/pe: $(GO_SRCS)
+bin/kpm: $(GO_SRCS)
 	@mkdir -p bin
-	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/pe
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/kpm
 
-bin/pe-index: $(GO_SRCS)
+bin/kpm-index: $(GO_SRCS)
 	@mkdir -p bin
-	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/pe-index
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/kpm-index
 
 bin/kryx-src: $(GO_SRCS)
 	@mkdir -p bin
@@ -33,68 +33,79 @@ test:
 
 verify: test build
 
+CRUX_COMPAT_SYMLINKS := pkgadd pkgrm pkginfo pkgmk ports rejmerge
+
 install: build
-	install -D -m 0755 bin/pe $(DESTDIR)$(BINDIR)/pe
-	install -D -m 0755 bin/pe-index $(DESTDIR)$(BINDIR)/pe-index
+	install -D -m 0755 bin/kpm $(DESTDIR)$(BINDIR)/kpm
+	install -D -m 0755 bin/kpm-index $(DESTDIR)$(BINDIR)/kpm-index
 	install -D -m 0755 bin/kryx-src $(DESTDIR)$(BINDIR)/kryx-src
+	for link in $(CRUX_COMPAT_SYMLINKS); do \
+		ln -sf kpm $(DESTDIR)$(BINDIR)/$$link; \
+	done
 	install -D -m 0755 scripts/setup $(DESTDIR)$(BINDIR)/setup
 	install -D -m 0755 scripts/setup-kryx $(DESTDIR)$(BINDIR)/setup-kryx
 	install -D -m 0755 scripts/setup-chroot $(DESTDIR)$(BINDIR)/setup-chroot
 	install -D -m 0755 scripts/setup-repo $(DESTDIR)$(BINDIR)/setup-repo
-	install -D -m 0644 man/pe.8 $(DESTDIR)$(MANDIR)/man8/pe.8
-	install -D -m 0644 man/pe-index.8 $(DESTDIR)$(MANDIR)/man8/pe-index.8
+	install -D -m 0644 man/kpm.8 $(DESTDIR)$(MANDIR)/man8/kpm.8
+	install -D -m 0644 man/kpm-index.8 $(DESTDIR)$(MANDIR)/man8/kpm-index.8
 	install -D -m 0644 man/kryx-src.8 $(DESTDIR)$(MANDIR)/man8/kryx-src.8
 	install -D -m 0644 man/setup.8 $(DESTDIR)$(MANDIR)/man8/setup.8
 	install -D -m 0644 man/setup-kryx.8 $(DESTDIR)$(MANDIR)/man8/setup-kryx.8
 	install -D -m 0644 man/setup-chroot.8 $(DESTDIR)$(MANDIR)/man8/setup-chroot.8
 	install -D -m 0644 man/setup-repo.8 $(DESTDIR)$(MANDIR)/man8/setup-repo.8
-	install -D -m 0644 completions/bash/pe $(DESTDIR)$(BASHCOMPDIR)/pe
-	ln -sf pe $(DESTDIR)$(BASHCOMPDIR)/pe-index
-	install -D -m 0644 completions/bash/pe.profile.sh $(DESTDIR)$(PROFILED)/pe-completion.sh
-	if [ ! -f $(DESTDIR)$(ETCDIR)/pe.ini ]; then \
-		install -D -m 0644 pe.ini.example $(DESTDIR)$(ETCDIR)/pe.ini; \
+	install -D -m 0644 completions/bash/kpm $(DESTDIR)$(BASHCOMPDIR)/kpm
+	ln -sf kpm $(DESTDIR)$(BASHCOMPDIR)/kpm-index
+	install -D -m 0644 completions/bash/kpm.profile.sh $(DESTDIR)$(PROFILED)/kpm-completion.sh
+	if [ ! -f $(DESTDIR)$(ETCDIR)/kpm.ini ]; then \
+		install -D -m 0644 kpm.ini.example $(DESTDIR)$(ETCDIR)/kpm.ini; \
 	fi
 	@if [ -z "$(DESTDIR)" ]; then \
-		for stale in /sbin/pe /sbin/pe-index /sbin/kryx-src /usr/local/bin/pe /usr/local/bin/pe-index /usr/local/bin/kryx-src; do \
+		for stale in /sbin/kpm /sbin/kpm-index /sbin/kryx-src /usr/local/bin/kpm /usr/local/bin/kpm-index /usr/local/bin/kryx-src; do \
 			if [ -e "$$stale" ]; then \
-				echo "WARNING: legacy binary found at $$stale (may shadow $(BINDIR)/pe in PATH). Run 'make clean-legacy' and 'hash -r'."; \
+				echo "WARNING: legacy binary found at $$stale (may shadow $(BINDIR)/kpm in PATH). Run 'make clean-legacy' and 'hash -r'."; \
 			fi; \
 		done; \
 	fi
 
 clean-legacy:
-	rm -f $(DESTDIR)/sbin/pe \
-	      $(DESTDIR)/sbin/pe-index \
+	rm -f $(DESTDIR)/sbin/kpm \
+	      $(DESTDIR)/sbin/kpm-index \
 	      $(DESTDIR)/sbin/kryx-src \
-	      $(DESTDIR)/usr/local/bin/pe \
-	      $(DESTDIR)/usr/local/bin/pe-index \
+	      $(DESTDIR)/usr/local/bin/kpm \
+	      $(DESTDIR)/usr/local/bin/kpm-index \
 	      $(DESTDIR)/usr/local/bin/kryx-src
 	@echo "Legacy binaries removed. Run 'hash -r' in your shell to clear cached command paths."
 
 uninstall:
-	rm -f $(DESTDIR)$(BINDIR)/pe \
-	      $(DESTDIR)$(BINDIR)/pe-index \
+	rm -f $(DESTDIR)$(BINDIR)/kpm \
+	      $(DESTDIR)$(BINDIR)/kpm-index \
 	      $(DESTDIR)$(BINDIR)/kryx-src \
 	      $(DESTDIR)$(BINDIR)/setup \
 	      $(DESTDIR)$(BINDIR)/setup-kryx \
 	      $(DESTDIR)$(BINDIR)/setup-chroot \
 	      $(DESTDIR)$(BINDIR)/setup-repo \
-	      $(DESTDIR)$(MANDIR)/man8/pe.8 \
-	      $(DESTDIR)$(MANDIR)/man8/pe-index.8 \
+	      $(DESTDIR)$(MANDIR)/man8/kpm.8 \
+	      $(DESTDIR)$(MANDIR)/man8/kpm-index.8 \
 	      $(DESTDIR)$(MANDIR)/man8/kryx-src.8 \
 	      $(DESTDIR)$(MANDIR)/man8/setup.8 \
 	      $(DESTDIR)$(MANDIR)/man8/setup-kryx.8 \
 	      $(DESTDIR)$(MANDIR)/man8/setup-chroot.8 \
 	      $(DESTDIR)$(MANDIR)/man8/setup-repo.8 \
-	      $(DESTDIR)$(BASHCOMPDIR)/pe \
-	      $(DESTDIR)$(BASHCOMPDIR)/pe-index \
-	      $(DESTDIR)$(PROFILED)/pe-completion.sh
-	@echo "Uninstalled pe tools. Run 'make clean-legacy' if older /sbin/pe exists, then 'hash -r'."
+	      $(DESTDIR)$(BASHCOMPDIR)/kpm \
+	      $(DESTDIR)$(BASHCOMPDIR)/kpm-index \
+	      $(DESTDIR)$(PROFILED)/kpm-completion.sh
+	for link in $(CRUX_COMPAT_SYMLINKS); do \
+		if [ -L $(DESTDIR)$(BINDIR)/$$link ] && [ "$$(readlink $(DESTDIR)$(BINDIR)/$$link)" = "kpm" ]; then \
+			rm -f $(DESTDIR)$(BINDIR)/$$link; \
+		fi; \
+	done
+	@echo "Uninstalled kpm tools. Run 'make clean-legacy' if older /sbin/kpm exists, then 'hash -r'."
 
 purge: uninstall clean-legacy
-	rm -rf $(DESTDIR)$(ETCDIR)/pe.ini \
-	       $(DESTDIR)$(ETCDIR)/pe \
-	       $(DESTDIR)/var/cache/pe
+	rm -rf $(DESTDIR)$(ETCDIR)/kpm.ini \
+	       $(DESTDIR)$(ETCDIR)/kpm \
+	       $(DESTDIR)/var/cache/kpm \
+	       $(DESTDIR)/var/lib/kpm
 
 clean:
 	rm -rf bin

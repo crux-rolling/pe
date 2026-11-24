@@ -7,13 +7,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kryx-linux/pe/internal/config"
-	"github.com/kryx-linux/pe/internal/ports"
-	"github.com/kryx-linux/pe/internal/repo"
+	"github.com/kryx-linux/kpm/internal/config"
+	"github.com/kryx-linux/kpm/internal/ports"
+	"github.com/kryx-linux/kpm/internal/repo"
 )
 
-// cmdDoctor runs a comprehensive system health check for pe, CRUX pkgdb,
-// shadowed PATH binaries (e.g. legacy /sbin/pe shadowing /usr/bin/pe),
+// cmdDoctor runs a comprehensive system health check for kpm, CRUX pkgdb,
+// shadowed PATH binaries (e.g. legacy /sbin/kpm shadowing /usr/bin/kpm),
 // configuration files, CA certificates, ports trees, and cached index.json.
 func cmdDoctor(cfg config.Config, args []string, stdout, stderr io.Writer, styles uiContext) error {
 	_ = args
@@ -32,9 +32,9 @@ func cmdDoctor(cfg config.Config, args []string, stdout, stderr io.Writer, style
 		fmt.Fprintf(stderr, "%s %-16s %s\n", styles.err.BoldRed("[FAIL]"), label, msg)
 	}
 
-	// 1. Check for duplicate/shadowed binaries across $PATH (catches /sbin/pe shadowing /usr/bin/pe).
+	// 1. Check for duplicate/shadowed binaries across $PATH (catches /sbin/kpm shadowing /usr/bin/kpm).
 	pathEnv := os.Getenv("PATH")
-	for _, binName := range []string{"pe", "pe-index", "kryx-src", "gports"} {
+	for _, binName := range []string{"kpm", "kpm-index", "kryx-src", "gports"} {
 		hits := findAllInPath(binName, pathEnv)
 		if len(hits) > 1 {
 			warn("path:"+binName, fmt.Sprintf("multiple copies in PATH (%s); first shadows later — remove legacy copy (e.g. sudo rm -f %s) and run: hash -r",
@@ -94,7 +94,7 @@ func cmdDoctor(cfg config.Config, args []string, stdout, stderr io.Writer, style
 	// 6. Check synced binary index.json.
 	idxPath := cfg.LocalIndexPath()
 	if idx, err := repo.Load(idxPath); err != nil {
-		warn("index.json", fmt.Sprintf("%s not synced yet (run: pe sync)", idxPath))
+		warn("index.json", fmt.Sprintf("%s not synced yet (run: kpm sync)", idxPath))
 	} else {
 		ok("index.json", fmt.Sprintf("%d package(s) cached in %s", len(idx.Packages), idxPath))
 	}

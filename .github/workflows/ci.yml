@@ -15,5 +15,5 @@ jobs:
           go-version-file: go.mod
       - name: Install CRUX archive tooling
         run: sudo apt-get update && sudo apt-get install -y libarchive-tools zstd xz-utils bzip2 gzip
-      - name: Build and test pe and pe-index
+      - name: Build and test kpm and kpm-index
         run: make verify

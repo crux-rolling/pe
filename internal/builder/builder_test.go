@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kryx-linux/pe/internal/archive"
-	"github.com/kryx-linux/pe/internal/config"
-	"github.com/kryx-linux/pe/internal/ports"
+	"github.com/kryx-linux/kpm/internal/archive"
+	"github.com/kryx-linux/kpm/internal/config"
+	"github.com/kryx-linux/kpm/internal/ports"
 )
 
 func TestBuildMinimalPkgfile(t *testing.T) {
@@ -20,7 +20,7 @@ func TestBuildMinimalPkgfile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Local source file + Pkgfile using $CFLAGS and $JOBS from pe.ini
+	// Local source file + Pkgfile using $CFLAGS and $JOBS from kpm.ini
 	if err := os.WriteFile(filepath.Join(portDir, "hello.sh"), []byte("#!/bin/sh\necho hello\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}

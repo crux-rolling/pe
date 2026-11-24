@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kryx-linux/pe/internal/archive"
-	"github.com/kryx-linux/pe/internal/pkgdb"
-	"github.com/kryx-linux/pe/internal/repo"
+	"github.com/kryx-linux/kpm/internal/archive"
+	"github.com/kryx-linux/kpm/internal/pkgdb"
+	"github.com/kryx-linux/kpm/internal/repo"
 )
 
 func createPkgArchive(t *testing.T, dir, name, verRel string, files map[string]string) (string, string, int64) {
@@ -51,7 +51,7 @@ func TestEndToEndCLIWorkflow(t *testing.T) {
 
 	// Create a local ports tree (left in place) with two ports:
 	// - "demo" (also has a binary in index.json)
-	// - "sourceonly" (NO binary in index.json -> `pe install` must refuse and instruct `pe build sourceonly`)
+	// - "sourceonly" (NO binary in index.json -> `kpm install` must refuse and instruct `kpm build sourceonly`)
 	portsDir := filepath.Join(base, "ports")
 	for name, desc := range map[string]string{
 		"demo":       "Demo binary package",
@@ -128,8 +128,8 @@ func TestEndToEndCLIWorkflow(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Write manual pe.ini
-	cfgPath := filepath.Join(base, "pe.ini")
+	// Write manual kpm.ini
+	cfgPath := filepath.Join(base, "kpm.ini")
 	iniContent := `
 [paths]
 root = ` + root + `
@@ -168,17 +168,17 @@ ignore_signature = true
 		return code, out.String(), errOut.String()
 	}
 
-	// 1. pe sync
+	// 1. kpm sync
 	if code, out, errOut := run("sync"); code != 0 || !strings.Contains(out, "synced") {
 		t.Fatalf("sync failed: code=%d out=%q err=%q", code, out, errOut)
 	}
 
-	// 2. pe list --ports
+	// 2. kpm list --ports
 	if code, out, errOut := run("list", "--ports"); code != 0 || !strings.Contains(out, "opt/demo") || !strings.Contains(out, "opt/sourceonly") {
 		t.Fatalf("list --ports failed: code=%d out=%q err=%q", code, out, errOut)
 	}
 
-	// 3. pe search (short-form output, plain and colored modes)
+	// 3. kpm search (short-form output, plain and colored modes)
 	if code, out, errOut := run("search", "demo"); code != 0 || !strings.Contains(out, "demo 1.0-1 [bin,port] - Demo binary package") {
 		t.Fatalf("search failed: code=%d out=%q err=%q", code, out, errOut)
 	}
@@ -189,12 +189,12 @@ ignore_signature = true
 		t.Fatalf("no-color search failed: code=%d out=%q err=%q", code, out, errOut)
 	}
 
-	// 4. pe install demo (binary-first, with download progress log)
+	// 4. kpm install demo (binary-first, with download progress log)
 	if code, out, errOut := run("install", "demo"); code != 0 || !strings.Contains(out, "installed demo 1.0-1") || !strings.Contains(out, "[sha256 ok]") {
 		t.Fatalf("install demo failed: code=%d out=%q err=%q", code, out, errOut)
 	}
 
-	// 4b. Verify flags work AFTER package names (e.g. `pe install demo --upgrade --force`)
+	// 4b. Verify flags work AFTER package names (e.g. `kpm install demo --upgrade --force`)
 	if code, out, errOut := run("install", "demo", "--upgrade", "--force"); code != 0 || !strings.Contains(out, "installed demo 1.0-1") {
 		t.Fatalf("interspersed flags install failed: code=%d out=%q err=%q", code, out, errOut)
 	}
@@ -213,36 +213,36 @@ ignore_signature = true
 		t.Fatalf("ls -p failed: code=%d out=%q err=%q", code, out, errOut)
 	}
 
-	// 5. pe install sourceonly MUST fail and instruct `pe build sourceonly` (never auto-build!)
+	// 5. kpm install sourceonly MUST fail and instruct `kpm build sourceonly` (never auto-build!)
 	code, out, errOut := run("install", "sourceonly")
 	if code == 0 {
 		t.Fatalf("expected install sourceonly to fail when binary is unavailable; out=%q", out)
 	}
-	if !strings.Contains(errOut, "pe build sourceonly") {
-		t.Fatalf("expected instruction to run 'pe build sourceonly', got stderr=%q", errOut)
+	if !strings.Contains(errOut, "kpm build sourceonly") {
+		t.Fatalf("expected instruction to run 'kpm build sourceonly', got stderr=%q", errOut)
 	}
 	// Verify no archive was auto-built in packages/
 	if matches, _ := filepath.Glob(filepath.Join(base, "packages", "sourceonly*")); len(matches) != 0 {
 		t.Fatalf("install must not auto-build sourceonly, found %v", matches)
 	}
 
-	// 6. pe build --install sourceonly (explicit build from ports)
+	// 6. kpm build --install sourceonly (explicit build from ports)
 	if code, out, errOut := run("build", "--install", "sourceonly"); code != 0 || !strings.Contains(out, "installed sourceonly 1.0-1") {
 		t.Fatalf("build --install sourceonly failed: code=%d out=%q err=%q", code, out, errOut)
 	}
 
-	// 7. pe update upgrades demo from 1.0-1 -> 2.0-1
+	// 7. kpm update upgrades demo from 1.0-1 -> 2.0-1
 	serveV2 = true
 	if code, out, errOut := run("update"); code != 0 || !strings.Contains(out, "updated demo 1.0-1 -> 2.0-1") {
 		t.Fatalf("update failed: code=%d out=%q err=%q", code, out, errOut)
 	}
 
-	// 8. pe list (installed)
+	// 8. kpm list (installed)
 	if code, out, errOut := run("list"); code != 0 || !strings.Contains(out, "demo 2.0-1") || !strings.Contains(out, "sourceonly 1.0-1") {
 		t.Fatalf("list installed failed: code=%d out=%q err=%q", code, out, errOut)
 	}
 
-	// 9. pe remove / pe uninstall
+	// 9. kpm remove / kpm uninstall
 	if code, out, errOut := run("remove", "demo"); code != 0 || !strings.Contains(out, "removed demo") {
 		t.Fatalf("remove demo failed: code=%d out=%q err=%q", code, out, errOut)
 	}
@@ -300,7 +300,7 @@ build() {
 		t.Fatal(err)
 	}
 
-	cfgPath := filepath.Join(base, "pe.ini")
+	cfgPath := filepath.Join(base, "kpm.ini")
 	iniContent := `
 [paths]
 root = ` + root + `
@@ -329,11 +329,11 @@ ignore_signature = true
 		return code, out.String(), errOut.String()
 	}
 
-	// 1. `pe b -f -d myapp` must build & auto-install mytool, then succeed building myapp
+	// 1. `kpm b -f -d myapp` must build & auto-install mytool, then succeed building myapp
 	//    without auto-installing myapp itself.
 	code, out, errOut := run("b", "-f", "-d", "myapp")
 	if code != 0 {
-		t.Fatalf("pe b -f -d myapp failed: code=%d out=%q err=%q", code, out, errOut)
+		t.Fatalf("kpm b -f -d myapp failed: code=%d out=%q err=%q", code, out, errOut)
 	}
 	if !strings.Contains(out, "installed dependency mytool 1.0-1") {
 		t.Fatalf("expected mytool dependency to be auto-installed, got out=%q", out)
@@ -349,7 +349,7 @@ ignore_signature = true
 		t.Fatalf("expected target myapp NOT installed without --install")
 	}
 
-	// 2. Re-running `pe b -f -d myapp` skips already-installed mytool and only rebuilds myapp.
+	// 2. Re-running `kpm b -f -d myapp` skips already-installed mytool and only rebuilds myapp.
 	code, out, errOut = run("b", "-f", "-d", "myapp")
 	if code != 0 {
 		t.Fatalf("second build --deps failed: code=%d out=%q err=%q", code, out, errOut)
@@ -358,10 +358,10 @@ ignore_signature = true
 		t.Fatalf("expected already-installed mytool to be skipped, got out=%q", out)
 	}
 
-	// 3. Remove mytool and serve a binary mytool via httptest; verify `pe b -d myapp` uses binary dep,
-	//    while `pe b -d -S myapp` builds dep from source.
+	// 3. Remove mytool and serve a binary mytool via httptest; verify `kpm b -d myapp` uses binary dep,
+	//    while `kpm b -d -S myapp` builds dep from source.
 	if code, _, errOut := run("r", "mytool"); code != 0 {
-		t.Fatalf("pe r mytool failed: %q", errOut)
+		t.Fatalf("kpm r mytool failed: %q", errOut)
 	}
 	binPkgPath, binSum, binSize := createPkgArchive(t, filepath.Join(base, "remote"), "mytool", "1.0-1", map[string]string{
 		"usr/bin/mytool": "#!/bin/sh\necho built-by-mytool\n",
@@ -395,7 +395,7 @@ ignore_signature = true
 		t.Fatal(err)
 	}
 	if code, out, errOut := run("sy"); code != 0 {
-		t.Fatalf("pe sy failed: code=%d out=%q err=%q", code, out, errOut)
+		t.Fatalf("kpm sy failed: code=%d out=%q err=%q", code, out, errOut)
 	}
 	code, out, errOut = run("b", "-f", "-d", "myapp")
 	if code != 0 || !strings.Contains(out, "installing binary dependency mytool 1.0-1") {

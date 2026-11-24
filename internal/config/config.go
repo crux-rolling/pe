@@ -1,4 +1,4 @@
-// Package config parses and validates pe's manual INI configuration file.
+// Package config parses and validates kpm's manual INI configuration file.
 package config
 
 import (
@@ -12,14 +12,14 @@ import (
 )
 
 const (
-	DefaultConfigPath = "/etc/pe.ini"
+	DefaultConfigPath = "/etc/kpm.ini"
 	DefaultRepo       = "kryx-linux/ports"
 	DefaultTag        = "rolling-x86_64"
 	DefaultArch       = "x86_64"
 	DefaultIndexURL   = "https://github.com/kryx-linux/ports/releases/download/rolling-x86_64/index.json"
 )
 
-// Config holds all runtime settings loaded from pe.ini.
+// Config holds all runtime settings loaded from kpm.ini.
 type Config struct {
 	Paths PathsConfig
 	Repo  RepoConfig
@@ -37,6 +37,7 @@ type NamedRepo struct {
 	IndexURL        string
 	TimeoutSeconds  int
 	VerifySignature bool
+	PubKey          string
 }
 
 // UIConfig configures terminal output behavior.
@@ -68,9 +69,11 @@ type RepoConfig struct {
 	IndexURL        string
 	TimeoutSeconds  int
 	VerifySignature bool
+	PubKey          string
+	Hold            []string
 }
 
-// BuildConfig configures Pkgfile builds (`pe build`), adapted from CRUX pkgmk.conf.
+// BuildConfig configures Pkgfile builds (`kpm build`), adapted from CRUX pkgmk.conf.
 type BuildConfig struct {
 	Jobs             int
 	CFLAGS           string
@@ -103,12 +106,12 @@ func Default() Config {
 			Root:            "/",
 			PortsDir:        "/usr/ports",
 			Collections:     []string{"core", "opt", "xorg", "contrib"},
-			CacheDir:        "/var/cache/pe",
-			SourceCache:     "/var/cache/pe/sources",
-			PackageDir:      "/var/cache/pe/packages",
-			WorkDir:         "/var/cache/pe/work",
+			CacheDir:        "/var/cache/kpm",
+			SourceCache:     "/var/cache/kpm/sources",
+			PackageDir:      "/var/cache/kpm/packages",
+			WorkDir:         "/var/cache/kpm/work",
 			PkgaddConf:      "/etc/pkgadd.conf",
-			KeysDir:         "/etc/pe/keys.d",
+			KeysDir:         "/etc/kpm/keys.d",
 			PortsConfDir:    "/etc/ports",
 			PortsDriversDir: "/etc/ports/drivers",
 		},
@@ -142,12 +145,12 @@ func Default() Config {
 	}
 }
 
-// ResolvePath chooses the INI config file path from explicit flag, PE_CONFIG env, or default.
+// ResolvePath chooses the INI config file path from explicit flag, KPM_CONFIG env, or default.
 func ResolvePath(explicit string) string {
 	if strings.TrimSpace(explicit) != "" {
 		return explicit
 	}
-	if env := strings.TrimSpace(os.Getenv("PE_CONFIG")); env != "" {
+	if env := strings.TrimSpace(os.Getenv("KPM_CONFIG")); env != "" {
 		return env
 	}
 	return DefaultConfigPath
@@ -194,6 +197,7 @@ func Parse(input string, cfg *Config) error {
 			Arch:            cfg.Repo.Arch,
 			TimeoutSeconds:  cfg.Repo.TimeoutSeconds,
 			VerifySignature: cfg.Repo.VerifySignature,
+			PubKey:          cfg.Repo.PubKey,
 		}
 		namedRepos[name] = nr
 		namedRepoOrder = append(namedRepoOrder, name)
@@ -280,12 +284,16 @@ func Parse(input string, cfg *Config) error {
 					return fmt.Errorf("line %d: invalid timeout_seconds %q: %w", lineNum, val, err)
 				}
 				cfg.Repo.TimeoutSeconds = n
-			case "verify_signature":
+			case "verify_signature", "verify_index_signature":
 				b, err := parseBool(val)
 				if err != nil {
-					return fmt.Errorf("line %d: invalid verify_signature %q", lineNum, val)
+					return fmt.Errorf("line %d: invalid %s %q", lineNum, key, val)
 				}
 				cfg.Repo.VerifySignature = b
+			case "pubkey", "public_key":
+				cfg.Repo.PubKey = val
+			case "hold":
+				cfg.Repo.Hold = splitList(val)
 			default:
 				return fmt.Errorf("line %d: unknown key %q in [repo]", lineNum, key)
 			}
@@ -395,12 +403,14 @@ func Parse(input string, cfg *Config) error {
 						return fmt.Errorf("line %d: invalid timeout_seconds %q: %w", lineNum, val, err)
 					}
 					nr.TimeoutSeconds = n
-				case "verify_signature":
+				case "verify_signature", "verify_index_signature":
 					b, err := parseBool(val)
 					if err != nil {
-						return fmt.Errorf("line %d: invalid verify_signature %q", lineNum, val)
+						return fmt.Errorf("line %d: invalid %s %q", lineNum, key, val)
 					}
 					nr.VerifySignature = b
+				case "pubkey", "public_key":
+					nr.PubKey = val
 				default:
 					return fmt.Errorf("line %d: unknown key %q in [%s]", lineNum, key, section)
 				}
@@ -495,6 +505,7 @@ func (c Config) AllRepos() []NamedRepo {
 		IndexURL:        c.Repo.IndexURL,
 		TimeoutSeconds:  c.Repo.TimeoutSeconds,
 		VerifySignature: c.Repo.VerifySignature,
+		PubKey:          c.Repo.PubKey,
 	}}
 }
 

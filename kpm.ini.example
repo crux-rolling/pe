@@ -1,8 +1,8 @@
-# /etc/pe.ini - pe package manager configuration for CRUX Linux
+# /etc/kpm.ini - kpm package manager configuration for CRUX Linux
 #
 # Edit manually to customize build flags, paths, and binary repository settings.
-# Override the config path with: pe --config /path/to/pe.ini <command>
-# or environment variable: PE_CONFIG=/path/to/pe.ini
+# Override the config path with: kpm --config /path/to/kpm.ini <command>
+# or environment variable: KPM_CONFIG=/path/to/kpm.ini
 
 [paths]
 # Installation root (standard CRUX root is /)
@@ -16,22 +16,22 @@ ports_dir = /usr/ports
 collections = rolling, core, opt, xorg, contrib
 
 # Directory for cached binary packages and synced index.json
-cache_dir = /var/cache/pe
+cache_dir = /var/cache/kpm
 
-# Directory for cached downloaded source tarballs used by `pe build`
-source_cache = /var/cache/pe/sources
+# Directory for cached downloaded source tarballs used by `kpm build`
+source_cache = /var/cache/kpm/sources
 
-# Directory where `pe build` places compiled .pkg.tar.<ext> archives
-package_dir = /var/cache/pe/packages
+# Directory where `kpm build` places compiled .pkg.tar.<ext> archives
+package_dir = /var/cache/kpm/packages
 
-# Working directory for `pe build` ($SRC and $PKG)
-work_dir = /var/cache/pe/work
+# Working directory for `kpm build` ($SRC and $PKG)
+work_dir = /var/cache/kpm/work
 
 # CRUX pkgadd configuration file (INSTALL/UPGRADE rules)
 pkgadd_conf = /etc/pkgadd.conf
 
 # Trusted Ed25519 release signing public keys (*.pub, kryx-ed25519 or ssh-ed25519)
-keys_dir = /etc/pe/keys.d
+keys_dir = /etc/kpm/keys.d
 
 # CRUX ports sync config/drivers directories
 ports_conf_dir = /etc/ports
@@ -43,7 +43,12 @@ repository = kryx-linux/ports
 tag = rolling-x86_64
 arch = x86_64
 index_url = https://github.com/kryx-linux/ports/releases/download/rolling-x86_64/index.json
-verify_signature = false
+verify_index_signature = false
+# Optional explicit signify/Ed25519 public key file (in addition to keys_dir/*.pub)
+# pubkey = /etc/kpm/keys.d/kryx-release.pub
+
+# Optional comma- or space-separated packages held/pinned during `kpm update`
+# hold = linux, glibc
 
 # HTTP timeout in seconds for syncing index.json and downloading binaries
 timeout_seconds = 120

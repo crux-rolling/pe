@@ -1,5 +1,5 @@
 // Package srcmachine implements kryx-src, a unified xbps-src-style source build,
-// linting, and release-staging engine sharing pe's internal packages.
+// linting, and release-staging engine sharing kpm's internal packages.
 package srcmachine
 
 import (
@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/kryx-linux/pe/internal/ports"
+	"github.com/kryx-linux/kpm/internal/ports"
 )
 
 // Entry represents a discovered port in a canonical registry, preserving both

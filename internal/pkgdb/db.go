@@ -372,9 +372,9 @@ func RunLdconfig(root string, errOut io.Writer) {
 	if out, err := cmd.CombinedOutput(); err != nil && errOut != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg != "" {
-			fmt.Fprintf(errOut, "pe: could not execute %s: %v (%s)\n", LdconfigPath, err, msg)
+			fmt.Fprintf(errOut, "kpm: could not execute %s: %v (%s)\n", LdconfigPath, err, msg)
 		} else {
-			fmt.Fprintf(errOut, "pe: could not execute %s: %v\n", LdconfigPath, err)
+			fmt.Fprintf(errOut, "kpm: could not execute %s: %v\n", LdconfigPath, err)
 		}
 	}
 }
@@ -409,7 +409,7 @@ func removePathsReverse(root string, files map[string]struct{}, ignoreNotEmpty b
 				continue
 			}
 			if errOut != nil {
-				fmt.Fprintf(errOut, "pe: could not remove %s: %v\n", full, err)
+				fmt.Fprintf(errOut, "kpm: could not remove %s: %v\n", full, err)
 			}
 		}
 	}

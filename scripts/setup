@@ -14,7 +14,7 @@ ARCH="x86_64"
 HOSTNAME_VAL="kryx"
 TIMEZONE="UTC"
 KEY_SRC=""
-PE_BIN="$(command -v pe 2>/dev/null || echo /usr/bin/pe)"
+KPM_BIN="$(command -v kpm 2>/dev/null || echo /usr/bin/kpm)"
 SETUP_REPO_BIN="$(command -v setup-repo 2>/dev/null || echo "${SCRIPT_DIR}/setup-repo")"
 SKIP_CONFIRM=0
 DRY_RUN=0
@@ -23,7 +23,7 @@ usage() {
     cat <<'EOF'
 Usage: setup [options]
 
-Bootstrap KryX Linux into a mounted target root (default: /mnt) using binary-first `pe`.
+Bootstrap KryX Linux into a mounted target root (default: /mnt) using binary-first `kpm`.
 Works from any live Linux ISO (CRUX ISO, Arch ISO, Alpine, Debian, Fedora).
 
 Options:
@@ -36,7 +36,7 @@ Options:
   --hostname <name>     System hostname (default: kryx)
   --timezone <tz>       Timezone under /usr/share/zoneinfo (default: UTC)
   --key <file|url>      Optional Ed25519 signing public key to trust
-  --pe-bin <path>       Path to static pe binary (default: auto-detected)
+  --kpm-bin <path>       Path to static kpm binary (default: auto-detected)
   --dry-run             Show resolved plan without installing packages
   -y, --yes             Non-interactive mode (skip confirmation prompt)
   -h, --help            Show this help message
@@ -54,7 +54,7 @@ while [[ $# -gt 0 ]]; do
         --hostname)   HOSTNAME_VAL="$2"; shift 2 ;;
         --timezone)   TIMEZONE="$2"; shift 2 ;;
         --key)        KEY_SRC="$2"; shift 2 ;;
-        --pe-bin)     PE_BIN="$2"; shift 2 ;;
+        --kpm-bin)     KPM_BIN="$2"; shift 2 ;;
         --dry-run)    DRY_RUN=1; shift ;;
         -y|--yes)     SKIP_CONFIRM=1; shift ;;
         -h|--help)    usage; exit 0 ;;
@@ -64,13 +64,13 @@ done
 
 case "$PROFILE" in
     minimal)
-        PROFILE_PKGS=(filesystem glibc bash coreutils pe gports)
+        PROFILE_PKGS=(filesystem glibc bash coreutils kpm gports)
         ;;
     base)
-        PROFILE_PKGS=(filesystem glibc bash coreutils util-linux procps eudev kmod iproute2 dhcpcd shadow tar gzip xz zstd ca-certificates kernel pe gports)
+        PROFILE_PKGS=(filesystem glibc bash coreutils util-linux procps eudev kmod iproute2 dhcpcd shadow tar gzip xz zstd ca-certificates kernel kpm gports)
         ;;
     devel)
-        PROFILE_PKGS=(filesystem glibc bash coreutils util-linux procps eudev kmod iproute2 dhcpcd shadow tar gzip xz zstd ca-certificates kernel gcc binutils make pkgconf patch diffutils findutils gawk sed grep curl git go pe gports)
+        PROFILE_PKGS=(filesystem glibc bash coreutils util-linux procps eudev kmod iproute2 dhcpcd shadow tar gzip xz zstd ca-certificates kernel gcc binutils make pkgconf patch diffutils findutils gawk sed grep curl git go kpm gports)
         ;;
     *)
         echo "setup: error: invalid --profile '${PROFILE}' (expected: minimal, base, or devel)" >&2
@@ -87,8 +87,8 @@ if [[ ! -d "$TARGET_ROOT" ]]; then
     echo "setup: error: target root directory does not exist: ${TARGET_ROOT}" >&2
     exit 1
 fi
-if [[ ! -x "$PE_BIN" ]]; then
-    echo "setup: error: static 'pe' binary not found at ${PE_BIN}" >&2
+if [[ ! -x "$KPM_BIN" ]]; then
+    echo "setup: error: static 'kpm' binary not found at ${KPM_BIN}" >&2
     exit 1
 fi
 if [[ ! -x "$SETUP_REPO_BIN" ]]; then
@@ -142,7 +142,7 @@ chmod 1777 "${ROOT_PREFIX}/tmp" "${ROOT_PREFIX}/var/tmp"
 chmod 0750 "${ROOT_PREFIX}/root"
 
 # 2. Initialize target repo config & sync index.json via setup-repo.
-REPO_ARGS=(--root "$TARGET_ROOT" --repo "$REPO_SLUG" --tag "$RELEASE_TAG" --arch "$ARCH" --pe-bin "$PE_BIN")
+REPO_ARGS=(--root "$TARGET_ROOT" --repo "$REPO_SLUG" --tag "$RELEASE_TAG" --arch "$ARCH" --kpm-bin "$KPM_BIN")
 if [[ -n "$KEY_SRC" ]]; then
     REPO_ARGS+=(--key "$KEY_SRC" --verify)
 fi
@@ -156,21 +156,21 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     exit 0
 fi
 
-# 3. Build a temporary host-side pe.ini pointing into TARGET_ROOT.
-HOST_PE_INI="$(mktemp "${TMPDIR:-/tmp}/kryx-setup-pe.XXXXXX.ini")"
-trap 'rm -f "$HOST_PE_INI"' EXIT
+# 3. Build a temporary host-side kpm.ini pointing into TARGET_ROOT.
+HOST_KPM_INI="$(mktemp "${TMPDIR:-/tmp}/kryx-setup-kpm.XXXXXX.ini")"
+trap 'rm -f "$HOST_KPM_INI"' EXIT
 sed \
     -e "s|^root = .*|root = ${TARGET_ROOT}|" \
     -e "s|^ports_dir = .*|ports_dir = ${ROOT_PREFIX}/usr/ports|" \
-    -e "s|^cache_dir = .*|cache_dir = ${ROOT_PREFIX}/var/cache/pe|" \
-    -e "s|^source_cache = .*|source_cache = ${ROOT_PREFIX}/var/cache/pe/sources|" \
-    -e "s|^package_dir = .*|package_dir = ${ROOT_PREFIX}/var/cache/pe/packages|" \
-    -e "s|^work_dir = .*|work_dir = ${ROOT_PREFIX}/var/cache/pe/work|" \
-    -e "s|^keys_dir = .*|keys_dir = ${ROOT_PREFIX}/etc/pe/keys.d|" \
-    "${ROOT_PREFIX}/etc/pe.ini" > "$HOST_PE_INI"
+    -e "s|^cache_dir = .*|cache_dir = ${ROOT_PREFIX}/var/cache/kpm|" \
+    -e "s|^source_cache = .*|source_cache = ${ROOT_PREFIX}/var/cache/kpm/sources|" \
+    -e "s|^package_dir = .*|package_dir = ${ROOT_PREFIX}/var/cache/kpm/packages|" \
+    -e "s|^work_dir = .*|work_dir = ${ROOT_PREFIX}/var/cache/kpm/work|" \
+    -e "s|^keys_dir = .*|keys_dir = ${ROOT_PREFIX}/etc/kpm/keys.d|" \
+    "${ROOT_PREFIX}/etc/kpm.ini" > "$HOST_KPM_INI"
 
 # 4. Partition requested profile packages into available binaries vs not-yet-published.
-AVAIL_INDEX="$("$PE_BIN" --config "$HOST_PE_INI" list --binaries | awk '{print $1}')"
+AVAIL_INDEX="$("$KPM_BIN" --config "$HOST_KPM_INI" list --binaries | awk '{print $1}')"
 INSTALL_LIST=()
 MISSING_LIST=()
 for pkg in "${PROFILE_PKGS[@]}"; do
@@ -184,16 +184,16 @@ done
 if [[ "${#MISSING_LIST[@]}" -gt 0 ]]; then
     echo "[setup] Note: the following profile package(s) are not yet published in ${RELEASE_TAG}:"
     echo "        ${MISSING_LIST[*]}"
-    echo "        (Install them from CRUX ISO media or build them after chroot with 'pe build --deps --install <pkg>'.)"
+    echo "        (Install them from CRUX ISO media or build them after chroot with 'kpm build --deps --install <pkg>'.)"
 fi
 
 if [[ "${#INSTALL_LIST[@]}" -gt 0 ]]; then
     echo "[setup] Installing ${#INSTALL_LIST[@]} binary package(s) into ${TARGET_ROOT}..."
-    "$PE_BIN" --config "$HOST_PE_INI" --root "$TARGET_ROOT" install --deps --reinstall "${INSTALL_LIST[@]}"
+    "$KPM_BIN" --config "$HOST_KPM_INI" --root "$TARGET_ROOT" install --deps --reinstall "${INSTALL_LIST[@]}"
 fi
 
-# 5. Ensure pe, pe-index, kryx-src, gports, and setup tools are present inside target rootfs.
-for tool in pe pe-index kryx-src gports setup setup-kryx setup-chroot setup-repo; do
+# 5. Ensure kpm, kpm-index, kryx-src, gports, and setup tools are present inside target rootfs.
+for tool in kpm kpm-index kryx-src gports setup setup-kryx setup-chroot setup-repo; do
     if [[ ! -x "${ROOT_PREFIX}/usr/bin/${tool}" ]]; then
         src_bin="$(command -v "$tool" 2>/dev/null || echo "${SCRIPT_DIR}/${tool}")"
         if [[ -x "$src_bin" ]]; then
@@ -243,5 +243,5 @@ echo "  1. Enter the new system:  setup-chroot ${TARGET_ROOT}"
 echo "  2. Edit /etc/fstab with your disk UUIDs (run: blkid)"
 echo "  3. Set root password:     passwd"
 echo "  4. Install/configure your bootloader (GRUB / systemd-boot / limine)"
-echo "  5. Verify health:         pe doctor"
+echo "  5. Verify health:         kpm doctor"
 echo "  6. Exit chroot & reboot!"

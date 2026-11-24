@@ -27,10 +27,10 @@ func TestDefaultConfig(t *testing.T) {
 }
 
 func TestParseINIAndExample(t *testing.T) {
-	examplePath := filepath.Join("..", "..", "pe.ini.example")
+	examplePath := filepath.Join("..", "..", "kpm.ini.example")
 	cfg, err := Load(examplePath, true)
 	if err != nil {
-		t.Fatalf("load pe.ini.example: %v", err)
+		t.Fatalf("load kpm.ini.example: %v", err)
 	}
 	if cfg.Build.Jobs != 4 {
 		t.Fatalf("expected jobs=4, got %d", cfg.Build.Jobs)
@@ -46,11 +46,11 @@ func TestParseINIAndExample(t *testing.T) {
 
 func TestMultiRepoAndMultiPortsConfig(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "pe.ini")
+	path := filepath.Join(dir, "kpm.ini")
 	content := `
 [paths]
 ports_dir = /usr/ports, /srv/local-ports
-keys_dir = /etc/pe/keys.d
+keys_dir = /etc/kpm/keys.d
 
 [repo.rolling]
 repository = kryx-linux/ports
@@ -79,7 +79,7 @@ index_url = https://example.org/extra/index.json
 
 func TestParseCustomINI(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "pe.ini")
+	path := filepath.Join(dir, "kpm.ini")
 	content := `
 # custom config
 [paths]

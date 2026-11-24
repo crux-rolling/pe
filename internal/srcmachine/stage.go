@@ -11,9 +11,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/kryx-linux/pe/internal/archive"
-	"github.com/kryx-linux/pe/internal/ports"
-	"github.com/kryx-linux/pe/internal/repo"
+	"github.com/kryx-linux/kpm/internal/archive"
+	"github.com/kryx-linux/kpm/internal/ports"
+	"github.com/kryx-linux/kpm/internal/repo"
 )
 
 // StageOptions configures repository indexing and GitHub-Release asset staging.
