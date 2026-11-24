@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	kpmroot "github.com/kryx-linux/kpm"
 	"github.com/kryx-linux/kpm/internal/archive"
 	"github.com/kryx-linux/kpm/internal/ports"
 	"github.com/kryx-linux/kpm/internal/repo"
@@ -29,10 +30,16 @@ func main() {
 	arch := fs.String("arch", defaultArch(), "package architecture")
 	prune := fs.Bool("prune", false, "remove index entries whose archives are no longer present in --packages")
 	signKey := fs.String("sign-key", "", "optional signify/Ed25519 private key path to generate signify-compatible <index>.sig")
+	showVersion := fs.Bool("version", false, "print version and exit")
+	showVersionShort := fs.Bool("v", false, "shorthand for --version")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
+	}
+	if *showVersion || *showVersionShort {
+		fmt.Printf("kpm-index %s\n", kpmroot.Version)
+		return
 	}
 
 	effPorts := strings.TrimSpace(*portsDirAlt)

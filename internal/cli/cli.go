@@ -16,6 +16,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	kpmroot "github.com/kryx-linux/kpm"
 	"github.com/kryx-linux/kpm/internal/archive"
 	"github.com/kryx-linux/kpm/internal/builder"
 	"github.com/kryx-linux/kpm/internal/config"
@@ -27,8 +28,9 @@ import (
 	"github.com/kryx-linux/kpm/internal/ui"
 )
 
-// Version is injected at link time via -ldflags.
-var Version = "0.5.3"
+// Version defaults to the single canonical kpm.Version embedded from VERSION
+// and may also be overridden at link time via -ldflags.
+var Version = kpmroot.Version
 
 // RuntimeOptions allows tests to run package transactions against temporary roots
 // without requiring root privileges or running host ldconfig.

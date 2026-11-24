@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	kpmroot "github.com/kryx-linux/kpm"
 )
 
 func TestPortsCLIEndToEndWithKPMIntegration(t *testing.T) {
@@ -59,7 +61,7 @@ func TestPortsCLIEndToEndWithKPMIntegration(t *testing.T) {
 
 	// 1. ports check should pass and NOT create portsDir
 	var out, errOut bytes.Buffer
-	code := Run(context.Background(), []string{"-c", cfgPath, "check"}, &out, &errOut, "0.6.0")
+	code := Run(context.Background(), []string{"-c", cfgPath, "check"}, &out, &errOut, kpmroot.Version)
 	if code != 0 {
 		t.Fatalf("ports check exited %d\nstdout=%s\nstderr=%s", code, out.String(), errOut.String())
 	}
@@ -70,7 +72,7 @@ func TestPortsCLIEndToEndWithKPMIntegration(t *testing.T) {
 	// 2. ports status should show 'not synced'
 	out.Reset()
 	errOut.Reset()
-	code = Run(context.Background(), []string{"status", "-c", cfgPath}, &out, &errOut, "0.6.0")
+	code = Run(context.Background(), []string{"status", "-c", cfgPath}, &out, &errOut, kpmroot.Version)
 	if code != 0 || !strings.Contains(out.String(), "not synced") {
 		t.Fatalf("ports status exited %d: out=%s err=%s", code, out.String(), errOut.String())
 	}
@@ -78,7 +80,7 @@ func TestPortsCLIEndToEndWithKPMIntegration(t *testing.T) {
 	// 3. ports -u -j 2 demo should sync cleanly into kpm.ini's ports_dir
 	out.Reset()
 	errOut.Reset()
-	code = Run(context.Background(), []string{"-c", cfgPath, "-u", "-j", "2", "demo"}, &out, &errOut, "0.6.0")
+	code = Run(context.Background(), []string{"-c", cfgPath, "-u", "-j", "2", "demo"}, &out, &errOut, kpmroot.Version)
 	if code != 0 || !strings.Contains(out.String(), "[DONE]") {
 		t.Fatalf("ports -u exited %d\nstdout=%s\nstderr=%s", code, out.String(), errOut.String())
 	}
@@ -86,7 +88,7 @@ func TestPortsCLIEndToEndWithKPMIntegration(t *testing.T) {
 	// 4. ports -l should list demo/demo
 	out.Reset()
 	errOut.Reset()
-	code = Run(context.Background(), []string{"-l"}, &out, &errOut, "0.6.0")
+	code = Run(context.Background(), []string{"-l"}, &out, &errOut, kpmroot.Version)
 	if code != 0 || strings.TrimSpace(out.String()) != "demo/demo" {
 		t.Fatalf("ports -l exited %d: out=%q err=%s", code, out.String(), errOut.String())
 	}
@@ -94,7 +96,7 @@ func TestPortsCLIEndToEndWithKPMIntegration(t *testing.T) {
 	// 5. ports -s should find demo by description
 	out.Reset()
 	errOut.Reset()
-	code = Run(context.Background(), []string{"-s", "Demo package"}, &out, &errOut, "0.6.0")
+	code = Run(context.Background(), []string{"-s", "Demo package"}, &out, &errOut, kpmroot.Version)
 	if code != 0 || !strings.Contains(out.String(), "demo/demo 2.0-1 - Demo package for ports") {
 		t.Fatalf("ports -s exited %d: out=%q err=%s", code, out.String(), errOut.String())
 	}
@@ -102,7 +104,7 @@ func TestPortsCLIEndToEndWithKPMIntegration(t *testing.T) {
 	// 6. ports -d should compare local port (2.0-1) against installed kpm DB (1.0-1)
 	out.Reset()
 	errOut.Reset()
-	code = Run(context.Background(), []string{"-d"}, &out, &errOut, "0.6.0")
+	code = Run(context.Background(), []string{"-d"}, &out, &errOut, kpmroot.Version)
 	if code != 0 || !strings.Contains(out.String(), "2.0-1") || !strings.Contains(out.String(), "1.0-1") {
 		t.Fatalf("ports -d exited %d: out=%q err=%s", code, out.String(), errOut.String())
 	}
@@ -110,7 +112,7 @@ func TestPortsCLIEndToEndWithKPMIntegration(t *testing.T) {
 	// 7. ports update (second run) should report [SKIP] (up-to-date)
 	out.Reset()
 	errOut.Reset()
-	code = Run(context.Background(), []string{"update", "-c", cfgPath}, &out, &errOut, "0.6.0")
+	code = Run(context.Background(), []string{"update", "-c", cfgPath}, &out, &errOut, kpmroot.Version)
 	if code != 0 || !strings.Contains(out.String(), "[SKIP]") {
 		t.Fatalf("ports update exited %d: out=%s err=%s", code, out.String(), errOut.String())
 	}

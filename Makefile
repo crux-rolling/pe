@@ -6,14 +6,18 @@ ETCDIR ?= /etc
 PROFILED ?= $(ETCDIR)/profile.d
 DESTDIR ?=
 
-VERSION ?= 0.6.0
-LDFLAGS := -s -w -X github.com/kryx-linux/kpm/internal/cli.Version=$(VERSION)
+VERSION ?= $(shell tr -d '[:space:]' < VERSION)
+LDFLAGS := -s -w -X github.com/kryx-linux/kpm.Version=$(VERSION) -X github.com/kryx-linux/kpm/internal/cli.Version=$(VERSION)
 MODFLAGS ?= -mod=vendor
-GO_SRCS := $(shell find cmd internal -type f -name '*.go') go.mod
+GO_SRCS := $(shell find cmd internal -type f -name '*.go') version.go VERSION go.mod
 
-.PHONY: all build test verify clean install uninstall clean-legacy purge
+.PHONY: all build test verify set-version clean install uninstall clean-legacy purge
 
 all: build
+
+set-version:
+	@test -n "$(V)" || { echo "Usage: make set-version V=<new-version> (e.g. make set-version V=0.6.1)" >&2; exit 2; }
+	./dev/set-version.sh "$(V)"
 
 build: bin/kpm bin/kpm-index bin/kryx-src
 

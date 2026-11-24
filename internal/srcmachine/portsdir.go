@@ -98,7 +98,7 @@ func ResolvePortsDir(cliPortsDir, kpmConfigPath, cwd string) (string, error) {
 			return subPorts, nil
 		}
 		// 4c. Standard collection directories directly under workspace
-		for _, col := range []string{"core", "opt", "xorg", "contrib", "rolling"} {
+		for _, col := range []string{"core", "opt", "xorg", "contrib", "pkg-tools", "kernel", "rolling"} {
 			if isDir(filepath.Join(cwd, col)) {
 				return cwd, nil
 			}
