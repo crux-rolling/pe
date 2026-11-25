@@ -38,7 +38,7 @@ test:
 
 verify: test build
 
-CRUX_COMPAT_SYMLINKS := pkgadd pkgrm pkginfo pkgmk ports rejmerge
+CRUX_COMPAT_SYMLINKS := pkgadd pkgrm pkginfo pkgmk ports rejmerge prt-get
 
 install: build
 	install -D -m 0755 bin/kpm $(DESTDIR)$(BINDIR)/kpm

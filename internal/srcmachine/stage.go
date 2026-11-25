@@ -24,6 +24,7 @@ type StageOptions struct {
 	UploadDir   string // Optional: copy archives here with GitHub-safe filenames ('#' -> '.')
 	BaseURL     string
 	Arch        string
+	AuditRoot   string // Optional: scan built archives for ELF DT_NEEDED & shebang deps against this root's pkgdb
 	Prune       bool
 	ErrOut      io.Writer
 }
@@ -126,6 +127,16 @@ func Stage(opts StageOptions) (StageResult, error) {
 			entry.Depends = pm.Depends
 			entry.MakeDepends = pm.MakeDepends
 			entry.Collection = pm.Collection
+		}
+		if strings.TrimSpace(opts.AuditRoot) != "" {
+			if autoDeps, aerr := DiscoverRuntimeDeps(p, opts.AuditRoot); aerr == nil && len(autoDeps) > 0 {
+				before := len(entry.Depends)
+				entry.Depends = mergeUniqueDeps(entry.Depends, autoDeps)
+				if len(entry.Depends) > before {
+					fmt.Fprintf(opts.ErrOut, "kryx-src: audit-deps added %d implicit runtime dep(s) for %s: %v\n",
+						len(entry.Depends)-before, name, entry.Depends[before:])
+				}
+			}
 		}
 
 		present[filename] = true

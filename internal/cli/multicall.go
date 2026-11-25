@@ -50,6 +50,8 @@ func RunWithArgv0Options(argv0 string, args []string, stdout, stderr io.Writer, 
 		return runPorts(args, stdout, stderr)
 	case "rejmerge":
 		return runRejmerge(args, stdout, stderr)
+	case "prt-get":
+		return runPrtGet(args, stdout, stderr)
 	default:
 		return RunWithOptions(args, stdout, stderr, rt)
 	}

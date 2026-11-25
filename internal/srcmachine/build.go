@@ -50,6 +50,7 @@ type BuildOptions struct {
 	DryRun          bool
 	SkipRootCheck   bool
 	SkipLdconfig    bool
+	FeaturesFile    string // Optional build-features.ini enabling # Optional deps per package
 	ColorMode       string
 	Out             io.Writer
 	ErrOut          io.Writer
@@ -132,6 +133,16 @@ func Build(opts BuildOptions) (BuildResult, error) {
 		}
 	}
 
+	// Load optional feature-dependency policy (e.g. enabling xorg-xwayland for wlroots).
+	var featureDeps map[string][]string
+	if strings.TrimSpace(opts.FeaturesFile) != "" {
+		if fd, ferr := LoadFeaturesFile(opts.FeaturesFile); ferr == nil {
+			featureDeps = fd
+		} else {
+			return BuildResult{}, fmt.Errorf("load features file %s: %w", opts.FeaturesFile, ferr)
+		}
+	}
+
 	// Fully evaluate root Pkgfiles so version/source/renames are exact.
 	rootPorts := make([]ports.Port, 0, len(roots))
 	relByDir := make(map[string]string, len(roots))
@@ -139,6 +150,9 @@ func Build(opts BuildOptions) (BuildResult, error) {
 		full, perr := ports.ParsePkgfile(r.Port.Dir, reg.PortsDir)
 		if perr != nil {
 			return BuildResult{}, perr
+		}
+		if extra := featureDeps[full.Name]; len(extra) > 0 {
+			full.Depends = mergeUniqueDeps(full.Depends, extra)
 		}
 		full.RelDir = r.RelDir
 		if reg.IsSinglePort {

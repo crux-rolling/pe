@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/kryx-linux/kpm/internal/cli"
+	"github.com/kryx-linux/kpm/internal/repo"
 	"github.com/kryx-linux/kpm/internal/signing"
 	"github.com/kryx-linux/kpm/internal/srcmachine"
 )
@@ -76,6 +77,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "audit-deps":
+		if err := cmdAuditDeps(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "kryx-src: %v\n", err)
+			return 1
+		}
+		return 0
+	case "verify-root":
+		if err := cmdVerifyRoot(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "kryx-src: %v\n", err)
+			return 1
+		}
+		return 0
+	case "shard-tag":
+		if err := cmdShardTag(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "kryx-src: %v\n", err)
+			return 1
+		}
+		return 0
 	default:
 		fmt.Fprintf(stderr, "kryx-src: unknown command %q\n\n", args[0])
 		printUsage(stderr)
@@ -96,6 +115,9 @@ Commands:
   stage, index     Generate/update index.json and optional GitHub-safe release upload assets
   sign             Sign index.json with a signify/Ed25519 private key (-> index.json.sig)
   rewrite-urls     Rewrite index.json URLs from GitHub release assets JSON and verify built archives
+  audit-deps       Scan built .pkg.tar.* archive for ELF DT_NEEDED & shebang runtime package deps
+  verify-root      Audit an installed rootfs for unresolved ELF DT_NEEDED shared libraries
+  shard-tag        Print GitHub Release shard tag for a collection/package name
   version          Print version and exit
   help             Show this help message
 
@@ -149,6 +171,7 @@ func cmdPkg(args []string, stdout, stderr io.Writer) error {
 	keepWork := fs.Bool("keep-work", false, "preserve work directory after build")
 	noStrip := fs.Bool("no-strip", false, "disable ELF stripping")
 	dryRun := fs.Bool("dry-run", false, "resolve and print build plan without compiling")
+	featuresFile := fs.String("features-file", "", "optional build-features.ini enabling # Optional deps per package")
 	colorMode := fs.String("color", "auto", "color output mode: auto, always, never")
 
 	if err := fs.Parse(args); err != nil {
@@ -224,6 +247,7 @@ func cmdPkg(args []string, stdout, stderr io.Writer) error {
 		KeepWork:        *keepWork,
 		NoStrip:         *noStrip,
 		DryRun:          *dryRun,
+		FeaturesFile:    *featuresFile,
 		ColorMode:       *colorMode,
 		Out:             stdout,
 		ErrOut:          stderr,
@@ -361,6 +385,7 @@ func cmdStage(args []string, stdout, stderr io.Writer) error {
 	uploadDir := fs.String("upload-dir", "", "optional directory to stage GitHub-safe ('#' -> '.') upload copies")
 	baseURL := fs.String("base-url", "", "base download URL for index entries")
 	arch := fs.String("arch", "x86_64", "package architecture")
+	auditRoot := fs.String("audit-root", "", "optional rootfs to auto-discover ELF DT_NEEDED & shebang runtime deps into index.json")
 	prune := fs.Bool("prune", false, "remove index entries missing from --packages")
 
 	if err := fs.Parse(args); err != nil {
@@ -387,6 +412,7 @@ func cmdStage(args []string, stdout, stderr io.Writer) error {
 		UploadDir:   *uploadDir,
 		BaseURL:     *baseURL,
 		Arch:        *arch,
+		AuditRoot:   *auditRoot,
 		Prune:       *prune,
 		ErrOut:      stderr,
 	})
@@ -456,6 +482,12 @@ func cmdPlan(args []string, stdout, stderr io.Writer) error {
 	repoHint := fs.String("port-repo", "", "optional source repo slug hint")
 	maxPorts := fs.Int("max-ports", 20, "maximum number of ports to include per workflow run")
 	chunkSize := fs.Int("chunk-size", 1, "number of ports per matrix job")
+	withDeps := fs.Bool("with-deps", false, "expand full transitive dependency closure into topological waves")
+	waveFilter := fs.Int("wave", -1, "emit only ports belonging to this topological wave (-1 = all waves)")
+	featuresFile := fs.String("features-file", "", "optional build-features.ini enabling # Optional deps per package")
+	skipFile := fs.String("skip-file", "", "optional skip-ports.txt listing quarantined ports to skip")
+	skipIndexed := fs.String("skip-indexed", "", "optional index.json path; skip ports whose exact version-release is already published")
+	arch := fs.String("arch", "x86_64", "target architecture for --skip-indexed lookups")
 	compact := fs.Bool("compact", false, "emit single-line JSON suitable for GITHUB_OUTPUT")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -472,7 +504,32 @@ func cmdPlan(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	plan, err := srcmachine.BuildMatrixPlan(reg, targets, *repoHint, *maxPorts, *chunkSize)
+	features, err := srcmachine.LoadFeaturesFile(*featuresFile)
+	if err != nil {
+		return fmt.Errorf("load --features-file: %w", err)
+	}
+	skipMap, err := srcmachine.LoadSkipFile(*skipFile)
+	if err != nil {
+		return fmt.Errorf("load --skip-file: %w", err)
+	}
+	var idxPtr *repo.Index
+	if strings.TrimSpace(*skipIndexed) != "" {
+		if loaded, lerr := repo.Load(*skipIndexed); lerr == nil {
+			idxPtr = &loaded
+		}
+	}
+	plan, err := srcmachine.BuildMatrixPlanWithOptions(reg, srcmachine.PlanOptions{
+		Targets:     targets,
+		RepoHint:    *repoHint,
+		MaxPorts:    *maxPorts,
+		ChunkSize:   *chunkSize,
+		WithDeps:    *withDeps,
+		WaveFilter:  *waveFilter,
+		Features:    features,
+		Skip:        skipMap,
+		SkipIndexed: idxPtr,
+		Arch:        *arch,
+	})
 	if err != nil {
 		return err
 	}
@@ -481,6 +538,64 @@ func cmdPlan(args []string, stdout, stderr io.Writer) error {
 		enc.SetIndent("", "  ")
 	}
 	return enc.Encode(plan)
+}
+
+func cmdAuditDeps(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("audit-deps", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	root := fs.String("root", "/", "rootfs containing /var/lib/pkg/db for soname/interpreter resolution")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return fmt.Errorf("usage: kryx-src audit-deps [--root /] <archive.pkg.tar.*...>")
+	}
+	for _, arc := range fs.Args() {
+		deps, err := srcmachine.DiscoverRuntimeDeps(arc, *root)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "%s: %s\n", filepath.Base(arc), strings.Join(deps, " "))
+	}
+	return nil
+}
+
+func cmdVerifyRoot(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("verify-root", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	root := fs.String("root", "/", "root directory to audit for unresolved ELF DT_NEEDED libraries")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	target := *root
+	if fs.NArg() > 0 {
+		target = fs.Arg(0)
+	}
+	issues, err := srcmachine.VerifyRoot(target)
+	if err != nil {
+		return err
+	}
+	if len(issues) > 0 {
+		for _, iss := range issues {
+			fmt.Fprintln(stderr, iss.String())
+		}
+		return fmt.Errorf("verify-root found %d unresolved shared library dependency issue(s) under %s", len(issues), target)
+	}
+	fmt.Fprintf(stdout, "verify-root: OK (zero unresolved ELF shared libraries under %s)\n", target)
+	return nil
+}
+
+func cmdShardTag(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("shard-tag", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	baseTag := fs.String("base-tag", "rolling-x86_64", "base release tag")
+	col := fs.String("collection", "", "port collection (core, opt, xorg, contrib, pkg-tools, kernel)")
+	pkg := fs.String("pkg", "", "package name (used for contrib a-m / n-z split)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, srcmachine.ShardTag(*baseTag, *col, *pkg))
+	return nil
 }
 
 func splitCSV(raw string) []string {
