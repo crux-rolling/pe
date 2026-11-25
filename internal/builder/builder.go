@@ -249,21 +249,92 @@ func resolveAndDownloadSources(cfg config.Config, port ports.Port, out io.Writer
 	return resolved, nil
 }
 
+var downloadRetryDelay = time.Second
+
+func fallbackSourceURLs(rawURL string) []string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil
+	}
+	host := strings.ToLower(u.Hostname())
+	cleanPath := strings.TrimPrefix(u.Path, "/")
+	var out []string
+	switch host {
+	case "ftpmirror.gnu.org":
+		gnuPath := strings.TrimPrefix(cleanPath, "gnu/")
+		if gnuPath != "" {
+			out = append(out,
+				"https://ftp.gnu.org/gnu/"+gnuPath,
+				"https://mirrors.kernel.org/gnu/"+gnuPath,
+			)
+		}
+	case "ftp.gnu.org":
+		gnuPath := strings.TrimPrefix(cleanPath, "gnu/")
+		if gnuPath != "" {
+			out = append(out, "https://mirrors.kernel.org/gnu/"+gnuPath)
+		}
+	case "download.savannah.gnu.org":
+		if cleanPath != "" {
+			out = append(out, "https://download-mirror.savannah.gnu.org/"+cleanPath)
+		}
+	case "download-mirror.savannah.gnu.org":
+		if cleanPath != "" {
+			out = append(out, "https://download.savannah.gnu.org/"+cleanPath)
+		}
+	case "download.savannah.nongnu.org":
+		if cleanPath != "" {
+			out = append(out, "https://download-mirror.savannah.nongnu.org/"+cleanPath)
+		}
+	case "download-mirror.savannah.nongnu.org":
+		if cleanPath != "" {
+			out = append(out, "https://download.savannah.nongnu.org/"+cleanPath)
+		}
+	}
+	return out
+}
+
+func isRedirectorMirrorHost(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "ftpmirror.gnu.org", "downloads.sourceforge.net", "prdownloads.sourceforge.net", "dl.sourceforge.net":
+		return true
+	default:
+		return false
+	}
+}
+
 func downloadSourceFile(cfg config.Config, rawURL, destPath string, out io.Writer) error {
 	fmt.Fprintf(out, "=======> Downloading '%s'.\n", rawURL)
 	base := sourceBasename(rawURL)
 
-	candidates := make([]string, 0, len(cfg.Build.SourceMirrors)+1)
+	fallbacks := fallbackSourceURLs(rawURL)
+	candidates := make([]string, 0, len(cfg.Build.SourceMirrors)+1+len(fallbacks))
+	seen := make(map[string]bool)
+	addCandidate := func(u string) {
+		if u != "" && !seen[u] {
+			seen[u] = true
+			candidates = append(candidates, u)
+		}
+	}
 	for _, mirror := range cfg.Build.SourceMirrors {
 		m := strings.TrimRight(mirror, "/")
 		if m != "" {
-			candidates = append(candidates, m+"/"+base)
+			addCandidate(m + "/" + base)
 		}
 	}
-	candidates = append(candidates, rawURL)
+	addCandidate(rawURL)
+	for _, fb := range fallbacks {
+		addCandidate(fb)
+	}
 
 	var lastErr error
-	for _, candidate := range candidates {
+	for idx, candidate := range candidates {
+		if idx > 0 && candidate != rawURL {
+			fmt.Fprintf(out, "=======> Trying fallback mirror '%s'.\n", candidate)
+		}
 		if strings.HasPrefix(candidate, "file://") {
 			u, err := url.Parse(candidate)
 			if err != nil {
@@ -278,7 +349,7 @@ func downloadSourceFile(cfg config.Config, rawURL, destPath string, out io.Write
 			}
 		}
 		if strings.HasPrefix(candidate, "http://") || strings.HasPrefix(candidate, "https://") {
-			if err := httpDownload(candidate, destPath, time.Duration(cfg.Repo.TimeoutSeconds)*time.Second, out, ui.NewStyler(cfg.UI.Color, out)); err == nil {
+			if err := httpDownloadWithRetry(candidate, destPath, time.Duration(cfg.Repo.TimeoutSeconds)*time.Second, 3, out, ui.NewStyler(cfg.UI.Color, out)); err == nil {
 				return nil
 			} else {
 				lastErr = err
@@ -320,18 +391,55 @@ func downloadSourceFile(cfg config.Config, rawURL, destPath string, out io.Write
 	return fmt.Errorf("downloading %q failed: %w", rawURL, lastErr)
 }
 
+type httpStatusError struct {
+	code   int
+	status string
+}
+
+func (e httpStatusError) Error() string {
+	return "HTTP " + e.status
+}
+
+func httpDownloadWithRetry(rawURL, destPath string, timeout time.Duration, maxAttempts int, out io.Writer, styler ui.Styler) error {
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err := httpDownload(rawURL, destPath, timeout, out, styler)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		// Don't waste retries on deterministic 4xx client errors unless the host is
+		// a random mirror redirector (where a different mirror may have the file).
+		if st, ok := err.(httpStatusError); ok && st.code >= 400 && st.code < 500 && st.code != http.StatusTooManyRequests && !isRedirectorMirrorHost(rawURL) {
+			return err
+		}
+		if attempt < maxAttempts {
+			fmt.Fprintf(out, "=======> Download attempt %d/%d failed (%v), retrying...\n", attempt, maxAttempts, err)
+			if downloadRetryDelay > 0 {
+				time.Sleep(downloadRetryDelay * time.Duration(attempt))
+			}
+		}
+	}
+	return lastErr
+}
+
 func httpDownload(rawURL, destPath string, timeout time.Duration, out io.Writer, styler ui.Styler) error {
 	if timeout <= 0 {
 		timeout = 120 * time.Second
 	}
-	client := &http.Client{Timeout: timeout}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DisableKeepAlives = true
+	client := &http.Client{Timeout: timeout, Transport: tr}
 	resp, err := client.Get(rawURL)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %s", resp.Status)
+		return httpStatusError{code: resp.StatusCode, status: resp.Status}
 	}
 	prog := ui.NewProgress(out, styler, "downloading "+filepath.Base(destPath), resp.ContentLength)
 	partial := destPath + ".partial"
