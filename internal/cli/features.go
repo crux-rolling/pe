@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -13,12 +14,14 @@ import (
 	"github.com/kryx-linux/kpm/internal/archive"
 	"github.com/kryx-linux/kpm/internal/check"
 	"github.com/kryx-linux/kpm/internal/config"
+	"github.com/kryx-linux/kpm/internal/depgraph"
 	"github.com/kryx-linux/kpm/internal/pkgdb"
 	"github.com/kryx-linux/kpm/internal/pkgops"
 	"github.com/kryx-linux/kpm/internal/ports"
 	"github.com/kryx-linux/kpm/internal/rejected"
 	"github.com/kryx-linux/kpm/internal/repo"
 	"github.com/kryx-linux/kpm/internal/state"
+	"github.com/kryx-linux/kpm/internal/tsort"
 )
 
 // --- 1. kpm info <pkg> ---
@@ -165,32 +168,19 @@ func cmdAutoremove(cfg config.Config, args []string, stdout, stderr io.Writer, r
 
 	idx, _ := loadLocalIndex(cfg)
 	portMap := discoverPortMap(cfg)
-	depsOf := func(pkg string) []string {
+	installedSet := make(map[string]bool, len(db.Packages))
+	for name := range db.Packages {
+		installedSet[name] = true
+	}
+	depsFn := func(pkg string) []string {
 		return runtimeDepsOf(pkg, idx, portMap, cfg.Repo.Arch)
 	}
 
-	// BFS/DFS from every installed package listed in world to find all reachable packages.
-	reachable := make(map[string]bool)
-	var visit func(pkg string)
-	visit = func(pkg string) {
-		if reachable[pkg] || !db.FindPkg(pkg) {
-			return
-		}
-		reachable[pkg] = true
-		for _, dep := range depsOf(pkg) {
-			visit(dep)
-		}
+	plan, err := depgraph.ResolveAutoremove(world, installedSet, depsFn)
+	if err != nil {
+		return err
 	}
-	for pkg := range world {
-		visit(pkg)
-	}
-
-	var orphans []string
-	for _, pkg := range db.SortedNames() {
-		if !reachable[pkg] {
-			orphans = append(orphans, pkg)
-		}
-	}
+	orphans := plan.Order
 
 	if len(orphans) == 0 {
 		fmt.Fprintln(stdout, styles.out.Green("no orphaned packages found"))
@@ -205,7 +195,7 @@ func cmdAutoremove(cfg config.Config, args []string, stdout, stderr io.Writer, r
 		return nil
 	}
 
-	// Remove in reverse dependency order (dependents before their deps).
+	// Remove strictly in reverse dependency order (dependents before their deps).
 	for _, o := range orphans {
 		if err := pkgops.RemovePackage(o, pkgops.RemoveOptions{
 			Root:          cfg.Paths.Root,
@@ -784,22 +774,261 @@ func runtimeDepsOf(pkg string, idx repo.Index, portMap map[string]ports.Port, ar
 }
 
 func buildReverseDepMap(db *pkgdb.DB, idx repo.Index, portMap map[string]ports.Port, arch string) map[string][]string {
-	rev := make(map[string][]string)
 	if db == nil {
-		return rev
+		return make(map[string][]string)
 	}
-	for _, pkgName := range db.SortedNames() {
-		for _, dep := range runtimeDepsOf(pkgName, idx, portMap, arch) {
-			if dep == pkgName {
-				continue
+	installedSet := make(map[string]bool, len(db.Packages))
+	for name := range db.Packages {
+		installedSet[name] = true
+	}
+	return depgraph.ReverseDeps(installedSet, func(pkg string) []string {
+		return runtimeDepsOf(pkg, idx, portMap, arch)
+	})
+}
+
+// --- 8. kpm deps / kpm graph ---
+
+func cmdDeps(cfg config.Config, args []string, stdout, stderr io.Writer, styles uiContext) error {
+	fs := flag.NewFlagSet("deps", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	showTree := fs.Bool("tree", false, "display dependency tree")
+	showTreeShort := fs.Bool("t", false, "display dependency tree")
+	reverse := fs.Bool("reverse", false, "show reverse dependencies (dependents)")
+	reverseShort := fs.Bool("R", false, "show reverse dependencies (dependents)")
+	showWaves := fs.Bool("waves", false, "group dependencies into parallel topological waves")
+	showWavesShort := fs.Bool("w", false, "group dependencies into parallel topological waves")
+	showDOT := fs.Bool("dot", false, "export Graphviz DOT digraph")
+	showCycles := fs.Bool("cycles", false, "check and display any dependency cycles (SCCs)")
+	withMake := fs.Bool("make", false, "include build-only MakeDepends in addition to runtime Depends")
+	maxDepth := fs.Int("depth", 0, "maximum depth for --tree (0 = unlimited)")
+	jsonOut := fs.Bool("json", false, "emit dependency graph report as JSON")
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+
+	targets := fs.Args()
+	doTree := *showTree || *showTreeShort
+	doReverse := *reverse || *reverseShort
+	doWaves := *showWaves || *showWavesShort
+
+	db, _ := openDBReadOnly(cfg.Paths.Root)
+	idx, _ := loadLocalIndex(cfg)
+	portMap := discoverPortMap(cfg)
+
+	depsFn := func(pkg string) []string {
+		var rdeps, mdeps []string
+		if e, ok := repo.Find(idx, pkg, cfg.Repo.Arch); ok {
+			rdeps = e.Depends
+			mdeps = e.MakeDepends
+		}
+		if p, ok := portMap[pkg]; ok {
+			if len(rdeps) == 0 {
+				rdeps = p.Depends
 			}
-			rev[dep] = append(rev[dep], pkgName)
+			if len(mdeps) == 0 {
+				mdeps = p.MakeDepends
+			}
+		}
+		if !*withMake || len(mdeps) == 0 {
+			return rdeps
+		}
+		out := make([]string, 0, len(rdeps)+len(mdeps))
+		seen := make(map[string]bool, len(rdeps)+len(mdeps))
+		for _, d := range rdeps {
+			if !seen[d] {
+				seen[d] = true
+				out = append(out, d)
+			}
+		}
+		for _, d := range mdeps {
+			if !seen[d] {
+				seen[d] = true
+				out = append(out, d)
+			}
+		}
+		return out
+	}
+
+	// Build known package universe for reverse-dep or full-graph cycle audits.
+	universeSet := make(map[string]bool)
+	if db != nil {
+		for name := range db.Packages {
+			universeSet[name] = true
 		}
 	}
-	for k := range rev {
-		sort.Strings(rev[k])
+	for name := range idx.Packages {
+		universeSet[name] = true
 	}
-	return rev
+	for name := range portMap {
+		universeSet[name] = true
+	}
+	universe := make([]string, 0, len(universeSet))
+	for name := range universeSet {
+		universe = append(universe, name)
+	}
+	sort.Strings(universe)
+
+	if len(targets) == 0 {
+		if *showCycles {
+			targets = universe
+		} else {
+			return fmt.Errorf("usage: kpm deps [--tree] [--reverse] [--waves] [--dot] [--cycles] [--make] [--depth N] [--json] <package...>")
+		}
+	}
+
+	g := depgraph.BuildSubgraph(targets, depsFn, doReverse, universe)
+	dag := tsort.Condense[string](g)
+	order, _, _ := tsort.SortCondensed[string](g, depgraph.ComparePkgPriority, false)
+	waves, _ := tsort.Waves[string](g, depgraph.ComparePkgPriority)
+
+	cycles := make([]depgraph.CycleInfo, len(dag.Cycles))
+	for i := range dag.Cycles {
+		members := make([]string, len(dag.Cycles[i]))
+		copy(members, dag.Cycles[i])
+		sort.Strings(members)
+		cycles[i] = depgraph.CycleInfo{
+			Members: members,
+			Path:    dag.CyclePaths[i],
+		}
+	}
+
+	if *jsonOut {
+		report := struct {
+			Targets []string             `json:"targets"`
+			Reverse bool                 `json:"reverse"`
+			Order   []string             `json:"order"`
+			Waves   [][]string           `json:"waves"`
+			Cycles  []depgraph.CycleInfo `json:"cycles,omitempty"`
+		}{
+			Targets: targets,
+			Reverse: doReverse,
+			Order:   order,
+			Waves:   waves,
+			Cycles:  cycles,
+		}
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(report)
+	}
+
+	if *showDOT {
+		title := "kpm_deps"
+		if len(targets) == 1 {
+			title = targets[0]
+		}
+		fmt.Fprint(stdout, depgraph.RenderDOT(g, title))
+		return nil
+	}
+
+	if *showCycles {
+		if len(cycles) == 0 {
+			fmt.Fprintf(stdout, "%s no dependency cycles found across %d package(s)\n",
+				styles.out.BoldGreen("[OK]"), len(order))
+			return nil
+		}
+		for _, c := range cycles {
+			fmt.Fprintf(stderr, "%s %s\n", styles.err.BoldRed("CYCLE"), c.String())
+		}
+		return fmt.Errorf("detected %d dependency cycle(s)", len(cycles))
+	}
+
+	if doTree {
+		treeFn := depsFn
+		if doReverse {
+			revMap := depgraph.ReverseDeps(universeSet, depsFn)
+			treeFn = func(pkg string) []string { return revMap[pkg] }
+		}
+		for i, t := range targets {
+			if i > 0 {
+				fmt.Fprintln(stdout)
+			}
+			fmt.Fprint(stdout, depgraph.RenderTree(t, treeFn, *maxDepth))
+		}
+		return nil
+	}
+
+	if doWaves {
+		for w, layer := range waves {
+			fmt.Fprintf(stdout, "%s %s\n",
+				styles.out.BoldCyan(fmt.Sprintf("Wave %d:", w)),
+				strings.Join(layer, " "),
+			)
+		}
+		return nil
+	}
+
+	for _, c := range cycles {
+		fmt.Fprintf(stderr, "%s dependency cycle detected: %s\n", styles.err.BoldYellow("warning:"), c.String())
+	}
+	for _, pkg := range order {
+		fmt.Fprintln(stdout, pkg)
+	}
+	return nil
+}
+
+// --- 9. kpm why <pkg...> ---
+
+func cmdWhy(cfg config.Config, args []string, stdout, stderr io.Writer, styles uiContext) error {
+	fs := flag.NewFlagSet("why", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	jsonOut := fs.Bool("json", false, "output explanation as JSON")
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return fmt.Errorf("usage: kpm why [--json] <package...>")
+	}
+
+	db, err := openDBReadOnly(cfg.Paths.Root)
+	if err != nil {
+		return err
+	}
+	world, _ := state.LoadWorld(cfg.Paths.Root)
+	idx, _ := loadLocalIndex(cfg)
+	portMap := discoverPortMap(cfg)
+
+	installedSet := make(map[string]bool, len(db.Packages))
+	for name := range db.Packages {
+		installedSet[name] = true
+	}
+	depsFn := func(pkg string) []string {
+		return runtimeDepsOf(pkg, idx, portMap, cfg.Repo.Arch)
+	}
+
+	results := make([]depgraph.WhyResult, 0, fs.NArg())
+	for _, target := range fs.Args() {
+		results = append(results, depgraph.Why(target, world, installedSet, depsFn))
+	}
+
+	if *jsonOut {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(results)
+	}
+
+	for i, res := range results {
+		if i > 0 {
+			fmt.Fprintln(stdout)
+		}
+		if !res.Installed {
+			fmt.Fprintf(stdout, "%s is %s\n", styles.out.Bold(res.Target), styles.out.Yellow("not installed"))
+			continue
+		}
+		if res.IsExplicit {
+			fmt.Fprintf(stdout, "%s is %s (in /var/lib/kpm/world)\n",
+				styles.out.Bold(res.Target), styles.out.BoldGreen("explicitly installed"))
+		}
+		if len(res.Paths) > 0 {
+			fmt.Fprintf(stdout, "%s is required by:\n", styles.out.Bold(res.Target))
+			for _, p := range res.Paths {
+				fmt.Fprintf(stdout, "  %s\n", strings.Join(p, " -> "))
+			}
+		} else if res.IsOrphan {
+			fmt.Fprintf(stdout, "%s is an %s (not in world and no world package depends on it; run 'kpm autoremove')\n",
+				styles.out.Bold(res.Target), styles.out.BoldYellow("orphan"))
+		}
+	}
+	return nil
 }
 
 func formatListOrNone(items []string) string {

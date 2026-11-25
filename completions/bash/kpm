@@ -275,7 +275,7 @@ _kpm_completions() {
 	fi
 
 	local global_opts="-c --config -r --root --color --no-color -v --version -h --help"
-	local subcommands="sync sy update upgrade up install in i downgrade build bld b search se s info show list ls l remove rm r uninstall autoremove ar clean check doctor hold unhold rejected rejmerge key help h version"
+	local subcommands="sync sy update upgrade up install in i downgrade build bld b search se s info show deps graph why list ls l remove rm r uninstall autoremove ar clean check doctor hold unhold rejected rejmerge key help h version"
 
 	# Determine active subcommand (scanning past global options)
 	local cmd="" cmd_idx=0 i w
@@ -345,9 +345,9 @@ _kpm_completions() {
 			return
 			;;
 
-		update|up)
+		update|upgrade|up)
 			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
-				COMPREPLY=( $(compgen -W "-f --force -v --verbose -n --no-sync -d --dry-run" -- "$cur") )
+				COMPREPLY=( $(compgen -W "-f --force -v --verbose -n --no-sync -d --dry-run --ignore-hold --strict-cycles --json" -- "$cur") )
 				return
 			fi
 			candidates="$(_kpm_installed_pkgs)"
@@ -357,10 +357,30 @@ _kpm_completions() {
 
 		install|in|i)
 			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
-				COMPREPLY=( $(compgen -W "-u --upgrade -R --reins --reinstall -f --force -v --verbose -d --deps" -- "$cur") )
+				COMPREPLY=( $(compgen -W "-u --upgrade -R --reins --reinstall -f --force -v --verbose -d --deps --offline --strict-cycles" -- "$cur") )
 				return
 			fi
 			candidates="$(_kpm_index_pkgs)"$'\n'"$(_kpm_local_archives "$cur")"
+			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
+			return
+			;;
+
+		deps|graph)
+			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
+				COMPREPLY=( $(compgen -W "-t --tree -R --reverse -w --waves --dot --cycles --make --depth --json" -- "$cur") )
+				return
+			fi
+			candidates="$(_kpm_index_pkgs)"$'\n'"$(_kpm_port_names)"$'\n'"$(_kpm_installed_pkgs)"
+			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
+			return
+			;;
+
+		why)
+			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
+				COMPREPLY=( $(compgen -W "--json" -- "$cur") )
+				return
+			fi
+			candidates="$(_kpm_installed_pkgs)"
 			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
 			return
 			;;
@@ -430,6 +450,10 @@ _kpm_completions() {
 			;;
 
 		remove|uninstall|rm|r)
+			if (( ! after_ddash )) && [[ "$cur" == -* ]]; then
+				COMPREPLY=( $(compgen -W "-f --force -c --cascade -d --dry-run" -- "$cur") )
+				return
+			fi
 			candidates="$(_kpm_installed_pkgs)"
 			COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
 			return

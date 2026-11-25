@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/kryx-linux/kpm/internal/repo"
+	"github.com/kryx-linux/kpm/internal/tsort"
 )
 
 // MatrixJob describes a single GitHub Actions matrix job produced by `kryx-src plan`.
@@ -24,6 +25,7 @@ type MatrixPlan struct {
 	TotalPorts int         `json:"total_ports"`
 	MaxWave    int         `json:"max_wave"`
 	Truncated  bool        `json:"truncated"`
+	Cycles     [][]string  `json:"cycles,omitempty"`
 	Include    []MatrixJob `json:"include"`
 }
 
@@ -127,31 +129,30 @@ func BuildMatrixPlanWithOptions(reg *Registry, opts PlanOptions) (MatrixPlan, er
 		addEntry(r)
 	}
 
-	// Compute topological wave depth among selected entries.
-	memo := make(map[string]int, len(selectedByDir))
-	visiting := make(map[string]bool)
-	var waveOf func(e Entry) int
-	waveOf = func(e Entry) int {
-		if w, ok := memo[e.Port.Dir]; ok {
-			return w
-		}
-		if visiting[e.Port.Dir] {
-			return 0
-		}
-		visiting[e.Port.Dir] = true
-		maxDep := -1
+	// Compute exact longest-path topological waves over the Tarjan SCC
+	// condensation DAG via internal/tsort (cycles are grouped cleanly into
+	// their SCC wave instead of collapsing to wave 0).
+	g := tsort.NewAdjGraph[string]()
+	selectedDirs := make([]string, 0, len(selectedByDir))
+	for dir := range selectedByDir {
+		selectedDirs = append(selectedDirs, dir)
+	}
+	sort.Slice(selectedDirs, func(i, j int) bool {
+		return selectedByDir[selectedDirs[i]].RelDir < selectedByDir[selectedDirs[j]].RelDir
+	})
+	for _, dir := range selectedDirs {
+		e := selectedByDir[dir]
+		g.AddNode(dir)
 		for _, dep := range depsOf(e) {
-			if de, ok := selectedByName[dep]; ok && de.Port.Dir != e.Port.Dir {
-				if dw := waveOf(de); dw > maxDep {
-					maxDep = dw
-				}
+			if de, ok := selectedByName[dep]; ok && de.Port.Dir != dir {
+				g.AddEdge(dir, de.Port.Dir)
 			}
 		}
-		delete(visiting, e.Port.Dir)
-		w := maxDep + 1
-		memo[e.Port.Dir] = w
-		return w
 	}
+
+	waves, rawCycles := tsort.Waves[string](g, func(a, b string) bool {
+		return selectedByDir[a].RelDir < selectedByDir[b].RelDir
+	})
 
 	type weighted struct {
 		entry Entry
@@ -159,33 +160,46 @@ func BuildMatrixPlanWithOptions(reg *Registry, opts PlanOptions) (MatrixPlan, er
 	}
 	items := make([]weighted, 0, len(selectedByDir))
 	maxWave := 0
-	for _, e := range selectedByDir {
-		w := waveOf(e)
-		if w > maxWave {
-			maxWave = w
-		}
+	if len(waves) > 0 {
+		maxWave = len(waves) - 1
+	}
+	for w, dirs := range waves {
 		if opts.WaveFilter >= 0 && w != opts.WaveFilter {
 			continue
 		}
-		if opts.SkipIndexed != nil && e.Port.Name != "" {
-			if idxEntry, ok := repo.Find(*opts.SkipIndexed, e.Port.Name, arch); ok {
-				if idxEntry.Pkgver == e.Port.Version && idxEntry.Pkgrel == e.Port.Release {
-					continue
+		for _, dir := range dirs {
+			e := selectedByDir[dir]
+			if opts.SkipIndexed != nil && e.Port.Name != "" {
+				if idxEntry, ok := repo.Find(*opts.SkipIndexed, e.Port.Name, arch); ok {
+					if idxEntry.Pkgver == e.Port.Version && idxEntry.Pkgrel == e.Port.Release {
+						continue
+					}
+				}
+			}
+			items = append(items, weighted{entry: e, wave: w})
+		}
+	}
+
+	var planCycles [][]string
+	for _, cyc := range rawCycles {
+		names := make([]string, 0, len(cyc))
+		for _, dir := range cyc {
+			if e, ok := selectedByDir[dir]; ok {
+				if e.Port.Name != "" {
+					names = append(names, e.Port.Name)
+				} else {
+					names = append(names, e.RelDir)
 				}
 			}
 		}
-		items = append(items, weighted{entry: e, wave: w})
+		sort.Strings(names)
+		planCycles = append(planCycles, names)
 	}
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].wave != items[j].wave {
-			return items[i].wave < items[j].wave
-		}
-		return items[i].entry.RelDir < items[j].entry.RelDir
-	})
 
 	plan := MatrixPlan{
 		TotalPorts: len(items),
 		MaxWave:    maxWave,
+		Cycles:     planCycles,
 	}
 	if len(items) > maxPorts {
 		items = items[:maxPorts]

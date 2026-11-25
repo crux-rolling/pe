@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/kryx-linux/kpm/internal/archive"
 	"github.com/kryx-linux/kpm/internal/builder"
 	"github.com/kryx-linux/kpm/internal/config"
+	"github.com/kryx-linux/kpm/internal/depgraph"
 	"github.com/kryx-linux/kpm/internal/pkgdb"
 	"github.com/kryx-linux/kpm/internal/pkgops"
 	"github.com/kryx-linux/kpm/internal/ports"
@@ -117,6 +120,10 @@ func RunWithOptions(args []string, stdout, stderr io.Writer, rt RuntimeOptions) 
 		runErr = cmdSearch(cfg, cmdArgs, stdout, stderr, styles)
 	case "info", "show":
 		runErr = cmdInfo(cfg, cmdArgs, stdout, stderr, styles)
+	case "deps", "graph":
+		runErr = cmdDeps(cfg, cmdArgs, stdout, stderr, styles)
+	case "why":
+		runErr = cmdWhy(cfg, cmdArgs, stdout, stderr, styles)
 	case "list", "ls", "l":
 		runErr = cmdList(cfg, cmdArgs, stdout, stderr, styles)
 	case "remove", "uninstall", "rm", "r":
@@ -255,8 +262,10 @@ Commands (with short aliases):
   build, bld, b           build package(s) from local CRUX Pkgfile ports using kpm.ini settings
   search, se, s           short-form search across binary index, local ports, and installed packages
   info, show              display detailed package metadata, dependencies, and reverse dependencies
+  deps, graph             inspect dependency graph (--tree, --reverse, --waves, --dot, --cycles)
+  why                     explain why package(s) are installed (shortest path from world)
   list, ls, l             list installed packages, ports (-p), binaries (-b), files (-f), owners (-o), or diff (-d)
-  remove, rm, r, uninstall  remove installed package(s) with reverse-dependency check (-f/--force overrides)
+  remove, rm, r, uninstall  remove package(s) in reverse-dep order (-c/--cascade, -d/--dry-run, -f/--force)
   autoremove, ar          remove orphaned dependency packages no longer required by world packages
   clean                   prune cached binary archives, partial downloads, and stale sources
   hold / unhold           pin or unpin packages to skip during 'kpm update'
@@ -351,6 +360,7 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 	withDeps := fs.Bool("deps", false, "also install missing dependencies from binary index")
 	withDepsShort := fs.Bool("d", false, "also install missing dependencies from binary index")
 	offline := fs.Bool("offline", false, "install strictly from local .pkg.tar.* files or cached binaries without network access")
+	strictCycles := fs.Bool("strict-cycles", false, "abort instead of breaking dependency cycles deterministically")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
@@ -424,16 +434,32 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 	}
 
 	// Read currently installed packages if resolving dependencies.
-	var installedMap map[string]pkgdb.PkgInfo
+	installedSet := make(map[string]bool)
 	if doDeps {
 		if db, dbErr := openDBReadOnly(cfg.Paths.Root); dbErr == nil {
-			installedMap = db.Packages
+			for name := range db.Packages {
+				installedSet[name] = true
+			}
 		}
 	}
 
 	installPlan := bareNames
 	if doDeps {
-		installPlan = resolveBinaryDeps(cfg, idx, bareNames, installedMap)
+		portMap := discoverPortMap(cfg)
+		depsFn := func(name string) []string {
+			return runtimeDepsOf(name, idx, portMap, cfg.Repo.Arch)
+		}
+		plan, perr := depgraph.ResolveInstall(bareNames, installedSet, depsFn, depgraph.Options{
+			StrictCycles: *strictCycles,
+		})
+		if perr != nil {
+			return perr
+		}
+		for _, cyc := range plan.Cycles {
+			fmt.Fprintf(stderr, "%s dependency cycle detected (%s); breaking deterministically\n",
+				styles.err.BoldYellow("warning:"), cyc.String())
+		}
+		installPlan = plan.Order
 	}
 
 	type resolvedInstall struct {
@@ -501,6 +527,29 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 	}
 
 	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
+
+	// Prefetch and SHA-256 verify all uncached remote binaries BEFORE modifying /var/lib/pkg/db
+	// so network failures never leave a half-installed transaction.
+	if !doOffline {
+		var toFetch []repo.Entry
+		fetchIdx := make([]int, 0, len(resolvedItems))
+		for i, item := range resolvedItems {
+			if item.cachedPath == "" {
+				toFetch = append(toFetch, item.entry)
+				fetchIdx = append(fetchIdx, i)
+			}
+		}
+		if len(toFetch) > 0 {
+			fetchedPaths, ferr := prefetchBinaries(toFetch, cfg.BinaryCacheDir(), timeout, stdout, styles.out)
+			if ferr != nil {
+				return ferr
+			}
+			for j, idxPos := range fetchIdx {
+				resolvedItems[idxPos].cachedPath = fetchedPaths[j]
+			}
+		}
+	}
+
 	for _, item := range resolvedItems {
 		localPath := item.cachedPath
 		if localPath == "" {
@@ -555,6 +604,8 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 	dryRun := fs.Bool("dry-run", false, "show available updates without installing")
 	dryRunShort := fs.Bool("d", false, "show available updates without installing")
 	ignoreHold := fs.Bool("ignore-hold", false, "upgrade held/pinned packages as well")
+	strictCycles := fs.Bool("strict-cycles", false, "abort instead of breaking dependency cycles deterministically")
+	jsonOut := fs.Bool("json", false, "output dry-run upgrade plan as JSON")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
@@ -655,34 +706,77 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 		return nil
 	}
 
-	if *dryRun || *dryRunShort {
-		for _, e := range toUpgrade {
-			fmt.Fprintf(stdout, "%s %s -> %s\n",
-				styles.out.Bold(e.Pkgname),
-				styles.out.Yellow(db.Packages[e.Pkgname].Version),
-				styles.out.Green(e.FullVersion()),
-			)
-		}
-		return nil
+	// Build ONE unified topological upgrade DAG over toUpgrade ∪ newly-required deps,
+	// bridging transitive dependencies through unchanged installed packages so shared
+	// libraries always upgrade strictly before packages that depend on them.
+	entryByName := make(map[string]repo.Entry, len(toUpgrade))
+	upgradeNames := make([]string, 0, len(toUpgrade))
+	for _, e := range toUpgrade {
+		entryByName[e.Pkgname] = e
+		upgradeNames = append(upgradeNames, e.Pkgname)
+	}
+	installedSet := make(map[string]bool, len(db.Packages))
+	for name := range db.Packages {
+		installedSet[name] = true
+	}
+	depsFn := func(pkg string) []string {
+		return runtimeDepsOf(pkg, idx, portMap, cfg.Repo.Arch)
+	}
+	upPlan, perr := depgraph.ResolveUpgrade(upgradeNames, installedSet, depsFn, depgraph.Options{
+		StrictCycles: *strictCycles,
+	})
+	if perr != nil {
+		return perr
+	}
+	for _, cyc := range upPlan.Cycles {
+		fmt.Fprintf(stderr, "%s dependency cycle detected (%s); breaking deterministically\n",
+			styles.err.BoldYellow("warning:"), cyc.String())
 	}
 
-	// Resolve any newly introduced runtime dependencies for upgraded packages so
-	// upgrades never leave missing shared libraries or runtime tools behind.
-	upgradeNames := make([]string, 0, len(toUpgrade))
-	upgradeSet := make(map[string]bool, len(toUpgrade))
-	for _, e := range toUpgrade {
-		upgradeNames = append(upgradeNames, e.Pkgname)
-		upgradeSet[e.Pkgname] = true
+	type resolvedUpStep struct {
+		entry    repo.Entry
+		isNewDep bool
+		oldVer   string
 	}
-	planned := resolveBinaryDeps(cfg, idx, upgradeNames, db.Packages)
-	var newDepEntries []repo.Entry
-	for _, depName := range planned {
-		if upgradeSet[depName] || db.FindPkg(depName) {
+	orderedSteps := make([]resolvedUpStep, 0, len(upPlan.Steps))
+	for _, st := range upPlan.Steps {
+		if st.IsNewDep {
+			if e, ok := repo.Find(idx, st.Name, cfg.Repo.Arch); ok {
+				orderedSteps = append(orderedSteps, resolvedUpStep{entry: e, isNewDep: true})
+			}
 			continue
 		}
-		if e, ok := repo.Find(idx, depName, cfg.Repo.Arch); ok {
-			newDepEntries = append(newDepEntries, e)
+		if e, ok := entryByName[st.Name]; ok {
+			orderedSteps = append(orderedSteps, resolvedUpStep{
+				entry:    e,
+				isNewDep: false,
+				oldVer:   db.Packages[st.Name].Version,
+			})
 		}
+	}
+
+	if *dryRun || *dryRunShort {
+		if *jsonOut {
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(upPlan)
+		}
+		for _, st := range orderedSteps {
+			if st.isNewDep {
+				fmt.Fprintf(stdout, "%s %s %s\n",
+					styles.out.Bold(st.entry.Pkgname),
+					styles.out.Cyan("(new dependency)"),
+					styles.out.Green(st.entry.FullVersion()),
+				)
+			} else {
+				fmt.Fprintf(stdout, "%s %s -> %s\n",
+					styles.out.Bold(st.entry.Pkgname),
+					styles.out.Yellow(st.oldVer),
+					styles.out.Green(st.entry.FullVersion()),
+				)
+			}
+		}
+		return nil
 	}
 
 	doForce := *force || *forceShort
@@ -690,38 +784,41 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 	timeout := time.Duration(cfg.Repo.TimeoutSeconds) * time.Second
 	upgradedSelf := false
 
-	for _, depEntry := range newDepEntries {
-		localPath, err := repo.FetchBinaryWithStyle(depEntry, cfg.BinaryCacheDir(), timeout, stdout, styles.out)
-		if err != nil {
-			return err
-		}
-		name, ver, err := pkgops.InstallArchive(localPath, pkgops.InstallOptions{
-			Root:          cfg.Paths.Root,
-			PkgaddConf:    cfg.Paths.PkgaddConf,
-			Reinstall:     true,
-			Force:         doForce,
-			Verbose:       doVerbose,
-			SkipRootCheck: rt.SkipRootCheck,
-			SkipLdconfig:  rt.SkipLdconfig,
-			Out:           stdout,
-			ErrOut:        stderr,
-		})
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "%s dependency %s %s\n",
-			styles.out.BoldGreen("installed"),
-			styles.out.Bold(name),
-			styles.out.Cyan(ver),
-		)
+	// Prefetch and SHA-256 verify all archives before mutating the system.
+	fetchEntries := make([]repo.Entry, len(orderedSteps))
+	for i, st := range orderedSteps {
+		fetchEntries[i] = st.entry
+	}
+	localPaths, ferr := prefetchBinaries(fetchEntries, cfg.BinaryCacheDir(), timeout, stdout, styles.out)
+	if ferr != nil {
+		return ferr
 	}
 
-	for _, entry := range toUpgrade {
-		oldVer := db.Packages[entry.Pkgname].Version
-		localPath, err := repo.FetchBinaryWithStyle(entry, cfg.BinaryCacheDir(), timeout, stdout, styles.out)
-		if err != nil {
-			return err
+	for i, st := range orderedSteps {
+		localPath := localPaths[i]
+		if st.isNewDep {
+			name, ver, err := pkgops.InstallArchive(localPath, pkgops.InstallOptions{
+				Root:          cfg.Paths.Root,
+				PkgaddConf:    cfg.Paths.PkgaddConf,
+				Reinstall:     true,
+				Force:         doForce,
+				Verbose:       doVerbose,
+				SkipRootCheck: rt.SkipRootCheck,
+				SkipLdconfig:  rt.SkipLdconfig,
+				Out:           stdout,
+				ErrOut:        stderr,
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "%s dependency %s %s\n",
+				styles.out.BoldGreen("installed"),
+				styles.out.Bold(name),
+				styles.out.Cyan(ver),
+			)
+			continue
 		}
+
 		name, newVer, err := pkgops.InstallArchive(localPath, pkgops.InstallOptions{
 			Root:          cfg.Paths.Root,
 			PkgaddConf:    cfg.Paths.PkgaddConf,
@@ -742,7 +839,7 @@ func cmdUpdate(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 		fmt.Fprintf(stdout, "%s %s %s -> %s\n",
 			styles.out.BoldGreen("updated"),
 			styles.out.Bold(name),
-			styles.out.Yellow(oldVer),
+			styles.out.Yellow(st.oldVer),
 			styles.out.Green(newVer),
 		)
 	}
@@ -1401,44 +1498,57 @@ func cmdRemove(cfg config.Config, args []string, stdout, stderr io.Writer, rt Ru
 	fs.SetOutput(stderr)
 	force := fs.Bool("force", false, "remove even if other installed packages depend on it")
 	forceShort := fs.Bool("f", false, "remove even if other installed packages depend on it")
+	cascade := fs.Bool("cascade", false, "also remove all installed packages depending on target(s) in reverse-dep order")
+	cascadeShort := fs.Bool("c", false, "also remove all installed packages depending on target(s) in reverse-dep order")
+	dryRun := fs.Bool("dry-run", false, "show planned removal order without removing packages")
+	dryRunShort := fs.Bool("d", false, "show planned removal order without removing packages")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 	targets := fs.Args()
 	if len(targets) == 0 {
-		return fmt.Errorf("usage: kpm remove [-f|--force] <package...>")
+		return fmt.Errorf("usage: kpm remove [-f|--force] [-c|--cascade] [-d|--dry-run] <package...>")
 	}
 
 	doForce := *force || *forceShort
-	if !doForce {
-		if db, err := openDBReadOnly(cfg.Paths.Root); err == nil {
-			idx, _ := loadLocalIndex(cfg)
-			portMap := discoverPortMap(cfg)
-			revDeps := buildReverseDepMap(db, idx, portMap, cfg.Repo.Arch)
-			removing := make(map[string]bool, len(targets))
-			for _, t := range targets {
-				removing[t] = true
-			}
+	doCascade := *cascade || *cascadeShort
+	doDryRun := *dryRun || *dryRunShort
+
+	removalOrder := targets
+	if db, err := openDBReadOnly(cfg.Paths.Root); err == nil {
+		idx, _ := loadLocalIndex(cfg)
+		portMap := discoverPortMap(cfg)
+		installedSet := make(map[string]bool, len(db.Packages))
+		for name := range db.Packages {
+			installedSet[name] = true
+		}
+		depsFn := func(pkg string) []string {
+			return runtimeDepsOf(pkg, idx, portMap, cfg.Repo.Arch)
+		}
+		plan, _ := depgraph.ResolveRemove(targets, installedSet, depsFn, doCascade)
+		if !doForce && !doCascade && len(plan.Blockers) > 0 {
 			for _, name := range targets {
-				if !db.FindPkg(name) {
-					continue
-				}
-				var blockers []string
-				for _, dependent := range revDeps[name] {
-					if !removing[dependent] {
-						blockers = append(blockers, dependent)
-					}
-				}
-				if len(blockers) > 0 {
+				if blockers := plan.Blockers[name]; len(blockers) > 0 {
 					fmt.Fprintf(stderr, "%s cannot remove %s: required by installed package(s): %s\n",
 						styles.err.BoldYellow("warning:"), styles.err.Bold(name), strings.Join(blockers, ", "))
-					return fmt.Errorf("refusing to remove %s (required by %s); pass --force to override", name, strings.Join(blockers, ", "))
+					return fmt.Errorf("refusing to remove %s (required by %s); pass --force to override or --cascade to remove dependents", name, strings.Join(blockers, ", "))
 				}
 			}
 		}
+		if len(plan.Order) > 0 {
+			removalOrder = plan.Order
+		}
 	}
 
-	for _, name := range targets {
+	if doDryRun {
+		fmt.Fprintf(stdout, "Package(s) to remove in dependency order (%d):\n", len(removalOrder))
+		for _, name := range removalOrder {
+			fmt.Fprintf(stdout, "  %s\n", styles.out.Bold(name))
+		}
+		return nil
+	}
+
+	for _, name := range removalOrder {
 		if err := pkgops.RemovePackage(name, pkgops.RemoveOptions{
 			Root:          cfg.Paths.Root,
 			SkipRootCheck: rt.SkipRootCheck,
@@ -1609,49 +1719,76 @@ func discoverPortMap(cfg config.Config) map[string]ports.Port {
 	return result
 }
 
-func resolveBinaryDeps(cfg config.Config, idx repo.Index, targets []string, installed map[string]pkgdb.PkgInfo) []string {
-	portMap := discoverPortMap(cfg)
-	targetSet := make(map[string]bool, len(targets))
-	for _, t := range targets {
-		targetSet[t] = true
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (sw *syncWriter) Write(p []byte) (int, error) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	return sw.w.Write(p)
+}
+
+// prefetchBinaries downloads (or verifies cached) binary archives concurrently
+// up to maxWorkers before any package database mutation occurs.
+func prefetchBinaries(entries []repo.Entry, cacheDir string, timeout time.Duration, out io.Writer, styler ui.Styler) ([]string, error) {
+	paths := make([]string, len(entries))
+	if len(entries) == 0 {
+		return paths, nil
+	}
+	if len(entries) == 1 {
+		p, err := repo.FetchBinaryWithStyle(entries[0], cacheDir, timeout, out, styler)
+		if err != nil {
+			return nil, err
+		}
+		paths[0] = p
+		return paths, nil
 	}
 
-	visited := make(map[string]bool)
-	visiting := make(map[string]bool)
-	var ordered []string
+	const maxWorkers = 4
+	workers := maxWorkers
+	if len(entries) < workers {
+		workers = len(entries)
+	}
 
-	var dfs func(name string)
-	dfs = func(name string) {
-		if visited[name] || visiting[name] {
-			return
-		}
-		if !targetSet[name] {
-			if _, ok := installed[name]; ok {
-				visited[name] = true
+	sw := &syncWriter{w: out}
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	for i, entry := range entries {
+		wg.Add(1)
+		go func(idx int, e repo.Entry) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			mu.Lock()
+			failed := firstErr != nil
+			mu.Unlock()
+			if failed {
 				return
 			}
-		}
-		visiting[name] = true
-		var deps []string
-		if entry, ok := repo.Find(idx, name, cfg.Repo.Arch); ok && len(entry.Depends) > 0 {
-			deps = entry.Depends
-		} else if p, ok := portMap[name]; ok {
-			deps = p.Depends
-		}
-		for _, dep := range deps {
-			dfs(dep)
-		}
-		delete(visiting, name)
-		if !visited[name] {
-			visited[name] = true
-			ordered = append(ordered, name)
-		}
-	}
 
-	for _, t := range targets {
-		dfs(t)
+			p, err := repo.FetchBinaryWithStyle(e, cacheDir, timeout, sw, styler)
+			mu.Lock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+			} else {
+				paths[idx] = p
+			}
+			mu.Unlock()
+		}(i, entry)
 	}
-	return ordered
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return paths, nil
 }
 
 // parseInterspersedFlags allows subcommand flags to appear before or after positional arguments

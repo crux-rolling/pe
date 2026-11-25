@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+
+	"github.com/kryx-linux/kpm/internal/tsort"
 )
 
 // Port holds parsed metadata from a CRUX Pkgfile.
@@ -455,56 +457,83 @@ func ResolveDeps(portsDir string, collections []string, targets []string) (order
 }
 
 // ResolveDepsForPorts resolves recursive Pkgfile dependencies for already-discovered
-// root ports in post-order (dependencies first), avoiding lossy re-lookups when a
-// port's directory name differs from its Pkgfile `name=`.
+// root ports in deterministic topological order (dependencies first) using
+// Tarjan SCC + Kahn condensation DAG via internal/tsort, avoiding lossy
+// re-lookups when a port's directory name differs from its Pkgfile `name=`.
 func ResolveDepsForPorts(portsDir string, collections []string, roots []Port) (ordered []Port, missing []string, err error) {
-	visited := make(map[string]bool)
-	visiting := make(map[string]bool)
+	portByKey := make(map[string]Port, len(roots))
+	expanded := make(map[string]bool)
 	missingSet := make(map[string]bool)
+	rank := make(map[string]int)
+	markRank := func(k string) {
+		if _, ok := rank[k]; !ok {
+			rank[k] = len(rank)
+		}
+	}
+	g := tsort.NewAdjGraph[string]()
 
-	var visitPort func(p Port) error
-	var dfsName func(name string) error
-
-	visitPort = func(p Port) error {
-		key := p.Name
-		if key == "" {
-			key = p.Dir
+	portKey := func(p Port) string {
+		if p.Name != "" {
+			return p.Name
 		}
-		if visited[key] || visiting[key] {
-			return nil
-		}
-		visiting[key] = true
-		for _, dep := range p.AllBuildDepends() {
-			if err := dfsName(dep); err != nil {
-				return err
-			}
-		}
-		delete(visiting, key)
-		if !visited[key] {
-			visited[key] = true
-			ordered = append(ordered, p)
-		}
-		return nil
+		return p.Dir
 	}
 
-	dfsName = func(name string) error {
-		if visited[name] || visiting[name] {
-			return nil
+	var expandPort func(p Port)
+	expandPort = func(p Port) {
+		key := portKey(p)
+		if expanded[key] {
+			return
 		}
-		p, findErr := Find(portsDir, collections, name)
-		if findErr != nil {
-			if !missingSet[name] {
-				missingSet[name] = true
-				missing = append(missing, name)
+		expanded[key] = true
+		markRank(key)
+		portByKey[key] = p
+		g.AddNode(key)
+
+		for _, dep := range p.AllBuildDepends() {
+			dep = strings.TrimSpace(dep)
+			if dep == "" {
+				continue
 			}
-			return nil
+			if dp, ok := portByKey[dep]; ok {
+				dkey := portKey(dp)
+				markRank(dkey)
+				g.AddEdge(key, dkey)
+				continue
+			}
+			dp, findErr := Find(portsDir, collections, dep)
+			if findErr != nil {
+				if !missingSet[dep] {
+					missingSet[dep] = true
+					missing = append(missing, dep)
+				}
+				continue
+			}
+			dkey := portKey(dp)
+			markRank(dkey)
+			portByKey[dkey] = dp
+			g.AddEdge(key, dkey)
+			expandPort(dp)
 		}
-		return visitPort(p)
 	}
 
 	for _, r := range roots {
-		if err := visitPort(r); err != nil {
-			return nil, nil, err
+		portByKey[portKey(r)] = r
+	}
+	for _, r := range roots {
+		expandPort(r)
+	}
+
+	orderKeys, _, _ := tsort.SortCondensed[string](g, func(a, b string) bool {
+		if ra, rb := rank[a], rank[b]; ra != rb {
+			return ra < rb
+		}
+		return a < b
+	}, false)
+	ordered = make([]Port, 0, len(orderKeys))
+	for _, k := range orderKeys {
+		if p, ok := portByKey[k]; ok {
+			ordered = append(ordered, p)
 		}
 	}
 	sort.Strings(missing)
@@ -527,7 +556,8 @@ type BuildStep struct {
 	AlreadyInstalled bool  // Dependency is already present in <root>/var/lib/pkg/db (skipped without expanding its deps)
 }
 
-// ResolveBuildPlan computes a topological (dependencies-first) build plan for roots:
+// ResolveBuildPlan computes a deterministic topological (dependencies-first)
+// build plan for roots via internal/tsort:
 //   - Explicitly requested root targets always build from source and require both
 //     Depends and MakeDepends.
 //   - Already-installed dependencies are skipped without expanding their deps.
@@ -537,6 +567,13 @@ type BuildStep struct {
 //     binary-only dependencies absent from the local ports tree.
 //   - Dependencies that must be compiled from source expand both Depends and MakeDepends.
 func ResolveBuildPlan(roots []Port, findPort PortLookup, installed map[string]bool, lookupBinary BinaryDepLookup) (plan []BuildStep, missing []string, err error) {
+	portKey := func(p Port) string {
+		if p.Name != "" {
+			return p.Name
+		}
+		return p.Dir
+	}
+
 	rootByName := make(map[string]Port, len(roots))
 	for _, r := range roots {
 		if r.Name != "" {
@@ -544,62 +581,81 @@ func ResolveBuildPlan(roots []Port, findPort PortLookup, installed map[string]bo
 		}
 	}
 
-	visited := make(map[string]bool)
-	visiting := make(map[string]bool)
+	stepByKey := make(map[string]BuildStep, len(roots))
+	expanded := make(map[string]bool)
 	missingSet := make(map[string]bool)
-
-	var visitSource func(p Port, isTarget bool) error
-	var visitDep func(name string) error
-
-	visitSource = func(p Port, isTarget bool) error {
-		key := p.Name
-		if key == "" {
-			key = p.Dir
+	rank := make(map[string]int)
+	markRank := func(k string) {
+		if _, ok := rank[k]; !ok {
+			rank[k] = len(rank)
 		}
-		if visited[key] || visiting[key] {
-			return nil
+	}
+	g := tsort.NewAdjGraph[string]()
+
+	var expandSource func(p Port, isTarget bool)
+	var resolveDep func(name string) (depKey string, ok bool)
+
+	expandSource = func(p Port, isTarget bool) {
+		key := portKey(p)
+		markRank(key)
+		if existing, exists := stepByKey[key]; exists && isTarget {
+			existing.IsTarget = true
+			existing.FromBinary = false
+			pc := p
+			existing.Port = &pc
+			stepByKey[key] = existing
 		}
-		visiting[key] = true
+		if expanded[key] {
+			return
+		}
+		expanded[key] = true
+		pc := p
+		stepByKey[key] = BuildStep{
+			Name:       p.Name,
+			Port:       &pc,
+			IsTarget:   isTarget,
+			FromBinary: false,
+		}
+		g.AddNode(key)
+
 		for _, dep := range p.AllBuildDepends() {
-			if err := visitDep(dep); err != nil {
-				return err
+			if dkey, ok := resolveDep(dep); ok {
+				g.AddEdge(key, dkey)
 			}
 		}
-		delete(visiting, key)
-		if !visited[key] {
-			visited[key] = true
-			pc := p
-			plan = append(plan, BuildStep{
-				Name:       p.Name,
-				Port:       &pc,
-				IsTarget:   isTarget,
-				FromBinary: false,
-			})
-		}
-		return nil
 	}
 
-	visitDep = func(name string) error {
-		if name == "" || visited[name] || visiting[name] {
-			return nil
+	resolveDep = func(name string) (string, bool) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return "", false
 		}
-		// If a dependency is itself one of the requested root targets, build it first.
 		if rootPort, isRoot := rootByName[name]; isRoot {
-			return visitSource(rootPort, true)
+			expandSource(rootPort, true)
+			return portKey(rootPort), true
+		}
+		if expanded[name] {
+			return name, true
+		}
+		if missingSet[name] {
+			return "", false
 		}
 		if installed[name] {
-			visited[name] = true
-			plan = append(plan, BuildStep{
+			expanded[name] = true
+			markRank(name)
+			stepByKey[name] = BuildStep{
 				Name:             name,
 				AlreadyInstalled: true,
-			})
-			return nil
+			}
+			g.AddNode(name)
+			return name, true
 		}
-		visiting[name] = true
 
 		// Binary-first dependency resolution: only runtime Depends are required.
 		if lookupBinary != nil {
 			if binDeps, ok := lookupBinary(name); ok {
+				expanded[name] = true
+				markRank(name)
 				deps := binDeps
 				var localPort *Port
 				if findPort != nil {
@@ -611,50 +667,52 @@ func ResolveBuildPlan(roots []Port, findPort PortLookup, installed map[string]bo
 						}
 					}
 				}
+				stepByKey[name] = BuildStep{
+					Name:       name,
+					Port:       localPort,
+					IsTarget:   false,
+					FromBinary: true,
+				}
+				g.AddNode(name)
 				for _, d := range deps {
-					if err := visitDep(d); err != nil {
-						return err
+					if dkey, dok := resolveDep(d); dok {
+						g.AddEdge(name, dkey)
 					}
 				}
-				delete(visiting, name)
-				if !visited[name] {
-					visited[name] = true
-					plan = append(plan, BuildStep{
-						Name:       name,
-						Port:       localPort,
-						IsTarget:   false,
-						FromBinary: true,
-					})
-				}
-				return nil
+				return name, true
 			}
 		}
 
 		// No binary available (or --source-deps): resolve from local ports tree and build from source.
 		if findPort == nil {
-			delete(visiting, name)
-			if !missingSet[name] {
-				missingSet[name] = true
-				missing = append(missing, name)
-			}
-			return nil
+			missingSet[name] = true
+			missing = append(missing, name)
+			return "", false
 		}
 		p, findErr := findPort(name)
 		if findErr != nil {
-			delete(visiting, name)
-			if !missingSet[name] {
-				missingSet[name] = true
-				missing = append(missing, name)
-			}
-			return nil
+			missingSet[name] = true
+			missing = append(missing, name)
+			return "", false
 		}
-		delete(visiting, name)
-		return visitSource(p, false)
+		expandSource(p, false)
+		return portKey(p), true
 	}
 
 	for _, r := range roots {
-		if err := visitSource(r, true); err != nil {
-			return nil, nil, err
+		expandSource(r, true)
+	}
+
+	orderKeys, _, _ := tsort.SortCondensed[string](g, func(a, b string) bool {
+		if ra, rb := rank[a], rank[b]; ra != rb {
+			return ra < rb
+		}
+		return a < b
+	}, false)
+	plan = make([]BuildStep, 0, len(orderKeys))
+	for _, k := range orderKeys {
+		if step, ok := stepByKey[k]; ok {
+			plan = append(plan, step)
 		}
 	}
 	sort.Strings(missing)
