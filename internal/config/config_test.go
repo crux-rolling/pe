@@ -38,7 +38,7 @@ func TestParseINIAndExample(t *testing.T) {
 	if cfg.Build.Compression != "zst" {
 		t.Fatalf("expected compression=zst, got %q", cfg.Build.Compression)
 	}
-	wantCols := []string{"pkg-tools", "kernel", "system", "core", "opt", "xorg", "contrib", "compat-32"}
+	wantCols := []string{"kpm-tools", "kernel", "system", "core", "opt", "xorg", "contrib", "compat-32"}
 	if !reflect.DeepEqual(cfg.Paths.Collections, wantCols) {
 		t.Fatalf("collections = %v, want %v", cfg.Paths.Collections, wantCols)
 	}

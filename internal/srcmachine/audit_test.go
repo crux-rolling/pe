@@ -153,7 +153,7 @@ func TestDiscoverRuntimeDepsShebangAndShardTag(t *testing.T) {
 	if got := ShardTag("rolling-x86_64", "contrib", "wlroots"); got != "rolling-x86_64-contrib-nz" {
 		t.Fatalf("unexpected contrib n-z shard tag: %q", got)
 	}
-	if got := ShardTag("rolling-x86_64", "pkg-tools", "kpm"); got != "rolling-x86_64-kryx" {
+	if got := ShardTag("rolling-x86_64", "kpm-tools", "kpm"); got != "rolling-x86_64-kryx" {
 		t.Fatalf("unexpected kryx shard tag: %q", got)
 	}
 }

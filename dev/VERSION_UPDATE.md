@@ -25,7 +25,7 @@ No other Go source file in `kpm` hardcodes a release version string.
 # Or via Makefile:
 make set-version V=0.6.1
 
-# Also update the sibling Pkgfile (../ports/pkg-tools/kpm/Pkgfile) in one command:
+# Also update the sibling Pkgfile (../ports/kpm-tools/kpm/Pkgfile) in one command:
 ./dev/set-version.sh --sync-ecosystem 0.6.1
 
 # Preview without modifying files:
@@ -61,5 +61,5 @@ Edit the single line in [`VERSION`](../VERSION), e.g.:
    git push origin main --tags
    ```
 4. **Update external ecosystem packaging (if not already synced with `--sync-ecosystem`):**
-   - `kryx-linux/ports`: update `version=` (and reset `release=1`) in `pkg-tools/kpm/Pkgfile`.
+   - `kryx-linux/ports`: update `version=` (and reset `release=1`) in `kpm-tools/kpm/Pkgfile`.
    - `kryx-linux/iso`: automatically picks up `VERSION` from `kryx-linux/kpm` during CI builds.

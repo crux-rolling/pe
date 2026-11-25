@@ -241,7 +241,7 @@ func countPorts(dir string) int {
 	if n := countDirectPorts(dir); n > 0 {
 		return n
 	}
-	// Multi-collection repo layout (e.g. kryx-linux/ports containing pkg-tools/ & kernel/).
+	// Multi-collection repo layout (e.g. kryx-linux/ports containing kpm-tools/, kernel/, & system/).
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0
@@ -274,8 +274,8 @@ func countDirectPorts(dir string) int {
 }
 
 // linkNestedCollections exposes nested collection directories inside a multi-collection
-// repository (such as /usr/ports/kryx/{pkg-tools,kernel}) as relative symlinks in the
-// parent ports directory (/usr/ports/pkg-tools -> kryx/pkg-tools) when safe to do so.
+// repository (such as /usr/ports/kryx/{kpm-tools,kernel,system}) as relative symlinks in the
+// parent ports directory (/usr/ports/kpm-tools -> kryx/kpm-tools) when safe to do so.
 func linkNestedCollections(destDir string) {
 	if countDirectPorts(destDir) > 0 {
 		return

@@ -84,7 +84,7 @@ cat > "$KPM_INI" <<EOF
 [paths]
 root = /
 ports_dir = ${PORTS_DIR}
-collections = pkg-tools, kernel, core, opt, xorg, contrib, compat-32
+collections = kpm-tools, kernel, system, core, opt, xorg, contrib, compat-32
 cache_dir = /var/cache/kpm
 source_cache = /var/cache/kpm/sources
 package_dir = /var/cache/kpm/packages

@@ -6,7 +6,7 @@
 # `VERSION` file (`//go:embed VERSION` in version.go + `$(shell cat VERSION)` in Makefile),
 # updating `VERSION` updates every binary in `kpm` in one place.
 #
-# Optionally pass `--sync-ecosystem` to also bump sibling `../ports/pkg-tools/kpm/Pkgfile`.
+# Optionally pass `--sync-ecosystem` to also bump sibling `../ports/kpm-tools/kpm/Pkgfile`.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,7 +25,7 @@ Sets the single canonical version in kpm/VERSION (embedded into kpm, kpm-index,
 kryx-src, and integrated ports via version.go + Makefile).
 
 Options:
-  --sync-ecosystem   Also update sibling ../ports/pkg-tools/kpm/Pkgfile (if present)
+  --sync-ecosystem   Also update sibling ../ports/kpm-tools/kpm/Pkgfile (if present)
   --dry-run          Print what would change without modifying files
   -h, --help         Show this help message
 
@@ -75,8 +75,8 @@ else
     echo "  [OK] Updated ${VERSION_FILE}"
 fi
 
-# Optional sibling ecosystem sync (ports/pkg-tools/kpm/Pkgfile)
-PKGFILE="${REPO_ROOT}/../ports/pkg-tools/kpm/Pkgfile"
+# Optional sibling ecosystem sync (ports/kpm-tools/kpm/Pkgfile)
+PKGFILE="${REPO_ROOT}/../ports/kpm-tools/kpm/Pkgfile"
 if [[ "$SYNC_ECOSYSTEM" -eq 1 ]]; then
     if [[ -f "$PKGFILE" ]]; then
         if [[ "$DRY_RUN" -eq 1 ]]; then

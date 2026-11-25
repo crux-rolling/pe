@@ -365,8 +365,8 @@ func TestLinkNestedCollectionsAndCountPorts(t *testing.T) {
 	portsDir := t.TempDir()
 	kryxDir := filepath.Join(portsDir, "kryx")
 	for _, rel := range []string{
-		"pkg-tools/kpm/Pkgfile",
-		"pkg-tools/zig/Pkgfile",
+		"kpm-tools/kpm/Pkgfile",
+		"kpm-tools/zig/Pkgfile",
 		"kernel/linux6.18/Pkgfile",
 		"docs/README.md",
 	} {
@@ -385,7 +385,7 @@ func TestLinkNestedCollectionsAndCountPorts(t *testing.T) {
 
 	linkNestedCollections(kryxDir)
 
-	for _, sub := range []string{"pkg-tools", "kernel"} {
+	for _, sub := range []string{"kpm-tools", "kernel"} {
 		target, err := os.Readlink(filepath.Join(portsDir, sub))
 		if err != nil {
 			t.Fatalf("expected symlink %s: %v", sub, err)

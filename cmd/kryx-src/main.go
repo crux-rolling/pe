@@ -125,7 +125,7 @@ Ports directory resolution priority (no hardcoded /usr/ports requirement):
   1. --ports-dir / -P / --ports <path>
   2. $KRYX_PORTS_DIR or $KPM_PORTS_DIR
   3. [paths] ports_dir in kpm.ini
-  4. Workspace auto-detection (./Pkgfile, ./ports, or ./core|opt|xorg|contrib|compat-32|pkg-tools|kernel|system)
+  4. Workspace auto-detection (./Pkgfile, ./ports, or ./core|opt|xorg|contrib|compat-32|kpm-tools|kernel|system)
   5. /usr/ports (only if present on disk)
 
 Run 'kryx-src <command> --help' for command-specific flags.
@@ -589,7 +589,7 @@ func cmdShardTag(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("shard-tag", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	baseTag := fs.String("base-tag", "rolling-x86_64", "base release tag")
-	col := fs.String("collection", "", "port collection (core, opt, xorg, contrib, pkg-tools, kernel)")
+	col := fs.String("collection", "", "port collection (core, opt, xorg, contrib, compat-32, kpm-tools, kernel, system)")
 	pkg := fs.String("pkg", "", "package name (used for contrib a-m / n-z split)")
 	if err := fs.Parse(args); err != nil {
 		return err
