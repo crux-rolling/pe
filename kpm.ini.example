@@ -13,7 +13,7 @@ ports_dir = /usr/ports
 
 # Comma- or space-separated port collections in priority order
 # Leave empty to auto-discover all collections under ports_dir
-collections = pkg-tools, kernel, core, opt, xorg, contrib, compat-32
+collections = pkg-tools, kernel, system, core, opt, xorg, contrib, compat-32
 
 # Directory for cached binary packages and synced index.json
 cache_dir = /var/cache/kpm

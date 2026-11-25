@@ -19,7 +19,7 @@ import (
 //  4. Workspace auto-detection in cwd:
 //     - ./Pkgfile or ./.kryx/Pkgfile (single-port repo)
 //     - ./ports directory
-//     - collection directories (./core, ./opt, ./xorg, ./contrib, ./rolling) in cwd
+//     - collection directories (./core, ./opt, ./xorg, ./contrib, ./compat-32, ./pkg-tools, ./kernel, ./system) in cwd
 //  5. Fallback to /usr/ports ONLY if /usr/ports exists on disk; otherwise return
 //     an actionable error explaining how to pass --ports-dir or set KRYX_PORTS_DIR.
 func ResolvePortsDir(cliPortsDir, kpmConfigPath, cwd string) (string, error) {
@@ -98,7 +98,7 @@ func ResolvePortsDir(cliPortsDir, kpmConfigPath, cwd string) (string, error) {
 			return subPorts, nil
 		}
 		// 4c. Standard collection directories directly under workspace
-		for _, col := range []string{"core", "opt", "xorg", "contrib", "compat-32", "pkg-tools", "kernel", "rolling"} {
+		for _, col := range []string{"core", "opt", "xorg", "contrib", "compat-32", "pkg-tools", "kernel", "system", "rolling"} {
 			if isDir(filepath.Join(cwd, col)) {
 				return cwd, nil
 			}

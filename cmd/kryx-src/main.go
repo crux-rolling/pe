@@ -125,7 +125,7 @@ Ports directory resolution priority (no hardcoded /usr/ports requirement):
   1. --ports-dir / -P / --ports <path>
   2. $KRYX_PORTS_DIR or $KPM_PORTS_DIR
   3. [paths] ports_dir in kpm.ini
-  4. Workspace auto-detection (./Pkgfile, ./ports, or ./core|opt|xorg|contrib|rolling)
+  4. Workspace auto-detection (./Pkgfile, ./ports, or ./core|opt|xorg|contrib|compat-32|pkg-tools|kernel|system)
   5. /usr/ports (only if present on disk)
 
 Run 'kryx-src <command> --help' for command-specific flags.
