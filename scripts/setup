@@ -1,44 +1,42 @@
 #!/usr/bin/env bash
-# setup - Bootstrap a KryX Linux system into a mounted target rootfs from ANY
-# live Linux ISO (including CRUX ISO, Arch ISO, Debian/Fedora/Alpine live USB).
+# setup - KryX Linux live installer powered exclusively by `kpm`.
+# Supports 100% offline installs from the ISO package pool (/run/live/media/pool),
+# hybrid offline+online installs, and online rolling-x86_64 installs.
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 TARGET_ROOT="/mnt"
 PROFILE="base"
+INIT_SYSTEM="rc"
 EXTRA_PKGS=""
-REPO_SLUG="kryx-linux/ports"
-RELEASE_TAG="rolling-x86_64"
-ARCH="x86_64"
 HOSTNAME_VAL="kryx"
 TIMEZONE="UTC"
-KEY_SRC=""
-KPM_BIN="$(command -v kpm 2>/dev/null || echo /usr/bin/kpm)"
-SETUP_REPO_BIN="$(command -v setup-repo 2>/dev/null || echo "${SCRIPT_DIR}/setup-repo")"
+POOL_DIR=""
+OFFLINE=0
+VERIFY_SIG=0
+SKIP_SYNC=0
 SKIP_CONFIRM=0
-DRY_RUN=0
+KPM_BIN="$(command -v kpm 2>/dev/null || echo /usr/bin/kpm)"
 
 usage() {
     cat <<'EOF'
 Usage: setup [options]
 
-Bootstrap KryX Linux into a mounted target root (default: /mnt) using binary-first `kpm`.
-Works from any live Linux ISO (CRUX ISO, Arch ISO, Alpine, Debian, Fedora).
+KryX Linux installer powered strictly by `kpm` (kpm --root=/mnt).
+Mount your target root filesystem at /mnt (and EFI at /mnt/boot/efi) first,
+or run `setup-kryx` for the guided Arch-like interactive TUI installer.
 
 Options:
-  --root <dir>          Mounted target root filesystem (default: /mnt)
+  --root <dir>          Target mounted rootfs (default: /mnt)
   --profile <name>      Package profile: minimal, base, or devel (default: base)
+  --init <rc|dinit>     Init system: rc (CRUX SysVinit, default) or dinit (supervising DAG)
   --extra "<pkgs...>"   Extra space-separated binary packages to install
-  --repo <owner/repo>   Binary GitHub repository slug (default: kryx-linux/ports)
-  --tag <tag>           Binary release tag (default: rolling-x86_64)
-  --arch <arch>         Target architecture (default: x86_64)
-  --hostname <name>     System hostname (default: kryx)
+  --pool <dir>          Local offline .pkg.tar.* pool directory (auto-detects /run/live/media/pool)
+  --offline             Install strictly offline from local ISO pool (do not touch network)
+  --hostname <name>     Target hostname (default: kryx)
   --timezone <tz>       Timezone under /usr/share/zoneinfo (default: UTC)
-  --key <file|url>      Optional Ed25519 signing public key to trust
-  --kpm-bin <path>       Path to static kpm binary (default: auto-detected)
-  --dry-run             Show resolved plan without installing packages
-  -y, --yes             Non-interactive mode (skip confirmation prompt)
+  --verify              Require signature verification during `kpm sync`
+  --no-sync             Reuse existing cached index.json without syncing
+  -y, --yes             Skip confirmation prompt
   -h, --help            Show this help message
 EOF
 }
@@ -47,66 +45,94 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --root)       TARGET_ROOT="$2"; shift 2 ;;
         --profile)    PROFILE="$2"; shift 2 ;;
+        --init)       INIT_SYSTEM="$2"; shift 2 ;;
         --extra)      EXTRA_PKGS="$2"; shift 2 ;;
-        --repo)       REPO_SLUG="$2"; shift 2 ;;
-        --tag)        RELEASE_TAG="$2"; shift 2 ;;
-        --arch)       ARCH="$2"; shift 2 ;;
+        --pool)       POOL_DIR="$2"; shift 2 ;;
+        --offline)    OFFLINE=1; SKIP_SYNC=1; shift ;;
         --hostname)   HOSTNAME_VAL="$2"; shift 2 ;;
         --timezone)   TIMEZONE="$2"; shift 2 ;;
-        --key)        KEY_SRC="$2"; shift 2 ;;
-        --kpm-bin)     KPM_BIN="$2"; shift 2 ;;
-        --dry-run)    DRY_RUN=1; shift ;;
+        --verify)     VERIFY_SIG=1; shift ;;
+        --no-sync)    SKIP_SYNC=1; shift ;;
         -y|--yes)     SKIP_CONFIRM=1; shift ;;
         -h|--help)    usage; exit 0 ;;
-        *)            echo "setup: unknown option: $1" >&2; usage >&2; exit 2 ;;
+        -*)           echo "setup: unknown option: $1" >&2; usage >&2; exit 2 ;;
+        *)            TARGET_ROOT="$1"; shift ;;
     esac
 done
 
+if [[ "$(id -u)" -ne 0 ]]; then
+    echo "setup: error: must be run as root" >&2
+    exit 1
+fi
+
+if [[ ! -d "$TARGET_ROOT" ]]; then
+    echo "setup: error: target root directory not found: ${TARGET_ROOT}" >&2
+    exit 1
+fi
+
+if [[ ! -x "$KPM_BIN" ]]; then
+    echo "setup: error: kpm binary not found at ${KPM_BIN}" >&2
+    exit 1
+fi
+
+# Auto-detect offline ISO package pool if not explicitly specified.
+if [[ -z "$POOL_DIR" ]]; then
+    for cand in /run/live/media/pool /media/kryx/pool /mnt/cdrom/pool; do
+        if [[ -d "$cand" && -f "${cand}/packages.list" ]]; then
+            POOL_DIR="$cand"
+            break
+        fi
+    done
+fi
+
 case "$PROFILE" in
     minimal)
-        PROFILE_PKGS=(filesystem glibc bash coreutils kpm gports)
+        PKGS=(filesystem glibc zlib bzip2 xz zstd attr acl libcap libcap-ng libxcrypt libpcre2 libgmp libmpfr libmd libbsd libtirpc libnsl linux-pam dumb_runtime_dir ncurses readline dash bash coreutils eudev util-linux sysvinit rc start-stop-daemon grep sed gawk findutils tar gzip kmod procps shadow inetutils kpm signify)
         ;;
     base)
-        PROFILE_PKGS=(filesystem glibc bash coreutils util-linux procps eudev kmod iproute2 dhcpcd shadow tar gzip xz zstd ca-certificates kernel kpm gports)
+        PKGS=(filesystem glibc zlib bzip2 xz zstd attr acl libcap libcap-ng libxcrypt libpcre2 libgmp libmpfr libmd libbsd libtirpc libnsl linux-pam dumb_runtime_dir expat db elfutils sqlite3 file libdevmapper ncurses readline dash bash coreutils eudev util-linux sysvinit rc start-stop-daemon grep sed gawk findutils tar gzip kmod procps shadow sudo less vim e2fsprogs dosfstools libmnl libnghttp2 openssl ca-certificates curl inetutils iproute2 iputils dhcpcd libnl dbus wireless-tools wpa_supplicant iwd linux-firmware dialog libpng freetype efivar efibootmgr grub2 grub2-efi kernel kpm signify)
         ;;
     devel)
-        PROFILE_PKGS=(filesystem glibc bash coreutils util-linux procps eudev kmod iproute2 dhcpcd shadow tar gzip xz zstd ca-certificates kernel gcc binutils make pkgconf patch diffutils findutils gawk sed grep curl git go kpm gports)
+        PKGS=(filesystem glibc zlib bzip2 xz zstd attr acl libcap libcap-ng libxcrypt libpcre2 libgmp libmpfr libmd libbsd libtirpc libnsl linux-pam dumb_runtime_dir expat db elfutils sqlite3 file libdevmapper ncurses readline dash bash coreutils eudev util-linux sysvinit rc start-stop-daemon grep sed gawk findutils tar gzip kmod procps shadow sudo less vim e2fsprogs dosfstools libmnl libnghttp2 openssl ca-certificates curl inetutils iproute2 iputils dhcpcd libnl dbus wireless-tools wpa_supplicant iwd linux-firmware dialog libpng freetype efivar efibootmgr grub2 grub2-efi kernel gcc binutils make pkgconf patch diffutils git go kpm signify)
         ;;
     *)
-        echo "setup: error: invalid --profile '${PROFILE}' (expected: minimal, base, or devel)" >&2
+        echo "setup: error: invalid profile '${PROFILE}' (expected: minimal, base, or devel)" >&2
         exit 2
         ;;
 esac
 
+case "$INIT_SYSTEM" in
+    rc|dinit) ;;
+    *)
+        echo "setup: error: invalid init system '${INIT_SYSTEM}' (expected: rc or dinit)" >&2
+        exit 2
+        ;;
+esac
+
+if [[ "$INIT_SYSTEM" == "dinit" ]]; then
+    PKGS+=(dinit dinit-kryx)
+    if [[ "$PROFILE" != "minimal" ]]; then
+        PKGS+=(turnstile)
+    fi
+fi
+
 if [[ -n "$EXTRA_PKGS" ]]; then
     read -r -a EXTRA_ARR <<< "$EXTRA_PKGS"
-    PROFILE_PKGS+=("${EXTRA_ARR[@]}")
+    PKGS+=("${EXTRA_ARR[@]}")
 fi
 
-if [[ ! -d "$TARGET_ROOT" ]]; then
-    echo "setup: error: target root directory does not exist: ${TARGET_ROOT}" >&2
-    exit 1
-fi
-if [[ ! -x "$KPM_BIN" ]]; then
-    echo "setup: error: static 'kpm' binary not found at ${KPM_BIN}" >&2
-    exit 1
-fi
-if [[ ! -x "$SETUP_REPO_BIN" ]]; then
-    echo "setup: error: 'setup-repo' script not found at ${SETUP_REPO_BIN}" >&2
-    exit 1
-fi
-
-echo "=== KryX Linux Installer (setup) ==="
-echo "  Target root: ${TARGET_ROOT}"
-echo "  Profile:     ${PROFILE}"
-echo "  Repository:  ${REPO_SLUG} (${RELEASE_TAG}, ${ARCH})"
-echo "  Hostname:    ${HOSTNAME_VAL}"
-echo "  Timezone:    ${TIMEZONE}"
-echo "  Packages:    ${PROFILE_PKGS[*]}"
+echo "=== KryX Linux Installer (kpm) ==="
+echo "  Target root : ${TARGET_ROOT}"
+echo "  Profile     : ${PROFILE}"
+echo "  Init system : ${INIT_SYSTEM}"
+echo "  Mode        : $( [[ "$OFFLINE" -eq 1 ]] && echo "offline (ISO pool)" || echo "hybrid/online" )"
+echo "  Local pool  : ${POOL_DIR:-<none>}"
+echo "  Hostname    : ${HOSTNAME_VAL}"
+echo "  Timezone    : ${TIMEZONE}"
 echo ""
 
-if [[ "$SKIP_CONFIRM" -eq 0 && "$DRY_RUN" -eq 0 ]]; then
-    read -r -p "Proceed with installation into ${TARGET_ROOT}? [y/N] " ans
+if [[ "$SKIP_CONFIRM" -eq 0 ]]; then
+    read -r -p "Install KryX Linux into ${TARGET_ROOT}? [y/N] " ans
     case "$ans" in
         y|Y|yes|YES) ;;
         *) echo "Aborted."; exit 0 ;;
@@ -115,12 +141,15 @@ fi
 
 ROOT_PREFIX="${TARGET_ROOT%/}"
 
-# 1. Create FHS base directories in target rootfs.
+# 1. Create FHS layout and kpm/pkgdb directories in target rootfs.
 mkdir -p \
     "${ROOT_PREFIX}/bin" \
     "${ROOT_PREFIX}/boot" \
     "${ROOT_PREFIX}/dev" \
+    "${ROOT_PREFIX}/etc/kpm/keys" \
+    "${ROOT_PREFIX}/etc/ports/sources.list.d" \
     "${ROOT_PREFIX}/etc/profile.d" \
+    "${ROOT_PREFIX}/etc/ssl/certs" \
     "${ROOT_PREFIX}/home" \
     "${ROOT_PREFIX}/lib" \
     "${ROOT_PREFIX}/mnt" \
@@ -135,30 +164,38 @@ mkdir -p \
     "${ROOT_PREFIX}/usr/lib" \
     "${ROOT_PREFIX}/usr/ports" \
     "${ROOT_PREFIX}/usr/sbin" \
+    "${ROOT_PREFIX}/var/cache/kpm/bin" \
+    "${ROOT_PREFIX}/var/cache/kpm/sources" \
+    "${ROOT_PREFIX}/var/cache/kpm/packages" \
+    "${ROOT_PREFIX}/var/cache/kpm/work" \
+    "${ROOT_PREFIX}/var/lib/kpm" \
     "${ROOT_PREFIX}/var/lib/pkg" \
     "${ROOT_PREFIX}/var/log" \
     "${ROOT_PREFIX}/var/tmp"
+
 chmod 1777 "${ROOT_PREFIX}/tmp" "${ROOT_PREFIX}/var/tmp"
 chmod 0750 "${ROOT_PREFIX}/root"
 
-# 2. Initialize target repo config & sync index.json via setup-repo.
-REPO_ARGS=(--root "$TARGET_ROOT" --repo "$REPO_SLUG" --tag "$RELEASE_TAG" --arch "$ARCH" --kpm-bin "$KPM_BIN")
-if [[ -n "$KEY_SRC" ]]; then
-    REPO_ARGS+=(--key "$KEY_SRC" --verify)
-fi
-if [[ "$DRY_RUN" -eq 1 ]]; then
-    REPO_ARGS+=(--no-sync)
-fi
-"$SETUP_REPO_BIN" "${REPO_ARGS[@]}"
-
-if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "[setup] Dry-run complete. No packages were installed."
-    exit 0
+if [[ ! -f "${ROOT_PREFIX}/var/lib/pkg/db" ]]; then
+    : > "${ROOT_PREFIX}/var/lib/pkg/db"
+    chmod 0444 "${ROOT_PREFIX}/var/lib/pkg/db"
 fi
 
-# 3. Build a temporary host-side kpm.ini pointing into TARGET_ROOT.
-HOST_KPM_INI="$(mktemp "${TMPDIR:-/tmp}/kryx-setup-kpm.XXXXXX.ini")"
-trap 'rm -f "$HOST_KPM_INI"' EXIT
+# 2. Copy live kpm, ports, pkgadd, and network configs into target rootfs.
+for cfg_file in /etc/kpm.ini /etc/pkgadd.conf /etc/ports/sources.list /etc/resolv.conf; do
+    if [[ -r "$cfg_file" ]]; then
+        install -D -m 0644 "$cfg_file" "${ROOT_PREFIX}${cfg_file}"
+    fi
+done
+if [[ -d /etc/kpm/keys ]]; then
+    cp -a /etc/kpm/keys/. "${ROOT_PREFIX}/etc/kpm/keys/"
+fi
+ln -sf /etc/kpm.ini "${ROOT_PREFIX}/etc/kpm/kpm.ini"
+
+# 3. Generate a temporary kpm config pointing cache & keys into TARGET_ROOT.
+TMP_KPM_INI="$(mktemp "${TMPDIR:-/tmp}/kryx-setup-kpm.XXXXXX.ini")"
+trap 'rm -f "$TMP_KPM_INI"' EXIT
+
 sed \
     -e "s|^root = .*|root = ${TARGET_ROOT}|" \
     -e "s|^ports_dir = .*|ports_dir = ${ROOT_PREFIX}/usr/ports|" \
@@ -166,43 +203,148 @@ sed \
     -e "s|^source_cache = .*|source_cache = ${ROOT_PREFIX}/var/cache/kpm/sources|" \
     -e "s|^package_dir = .*|package_dir = ${ROOT_PREFIX}/var/cache/kpm/packages|" \
     -e "s|^work_dir = .*|work_dir = ${ROOT_PREFIX}/var/cache/kpm/work|" \
-    -e "s|^keys_dir = .*|keys_dir = ${ROOT_PREFIX}/etc/kpm/keys.d|" \
-    "${ROOT_PREFIX}/etc/kpm.ini" > "$HOST_KPM_INI"
+    -e "s|^keys_dir = .*|keys_dir = ${ROOT_PREFIX}/etc/kpm/keys|" \
+    -e "s|^pubkey = .*|pubkey = ${ROOT_PREFIX}/etc/kpm/keys/kryx-release.pub|" \
+    "${ROOT_PREFIX}/etc/kpm.ini" > "$TMP_KPM_INI"
 
-# 4. Partition requested profile packages into available binaries vs not-yet-published.
-AVAIL_INDEX="$("$KPM_BIN" --config "$HOST_KPM_INI" list --binaries | awk '{print $1}')"
-INSTALL_LIST=()
-MISSING_LIST=()
-for pkg in "${PROFILE_PKGS[@]}"; do
-    if grep -qx "$pkg" <<< "$AVAIL_INDEX"; then
-        INSTALL_LIST+=("$pkg")
+# 4. Install offline base packages from the ISO pool first (zero internet required).
+REMOTE_NEEDED=()
+if [[ -n "$POOL_DIR" && -d "$POOL_DIR" ]]; then
+    shopt -s nullglob
+    POOL_SELECTED=()
+    for p in "${PKGS[@]}"; do
+        matches=("${POOL_DIR}/${p}"#*.pkg.tar.*)
+        if [[ "${#matches[@]}" -gt 0 ]]; then
+            POOL_SELECTED+=("${matches[0]}")
+        else
+            REMOTE_NEEDED+=("$p")
+        fi
+    done
+    shopt -u nullglob
+    if [[ "${#POOL_SELECTED[@]}" -gt 0 ]]; then
+        echo "[setup] Installing ${#POOL_SELECTED[@]} base package(s) offline from ${POOL_DIR}..."
+        "$KPM_BIN" --config "$TMP_KPM_INI" --root="$TARGET_ROOT" install --reinstall --force "${POOL_SELECTED[@]}"
     else
-        MISSING_LIST+=("$pkg")
+        echo "setup: error: local pool ${POOL_DIR} contained no matching .pkg.tar.* archives" >&2
+        exit 1
+    fi
+else
+    if [[ "$OFFLINE" -eq 1 ]]; then
+        echo "setup: error: --offline requested but ISO package pool was not found at /run/live/media/pool" >&2
+        exit 1
+    fi
+    REMOTE_NEEDED=("${PKGS[@]}")
+fi
+
+# 5. Optionally sync remote binary index and install remaining packages when online.
+if [[ "$OFFLINE" -eq 0 && "${#REMOTE_NEEDED[@]}" -gt 0 ]]; then
+    if [[ "$SKIP_SYNC" -eq 0 ]]; then
+        SYNC_ARGS=()
+        [[ "$VERIFY_SIG" -eq 1 ]] && SYNC_ARGS+=(--verify)
+        echo "[setup] Syncing binary package index via kpm..."
+        if ! "$KPM_BIN" --config "$TMP_KPM_INI" sync "${SYNC_ARGS[@]}"; then
+            echo "[setup] Warning: network sync failed; continuing with offline installed packages." >&2
+        fi
+    elif [[ -f /var/cache/kpm/index.json && ! -f "${ROOT_PREFIX}/var/cache/kpm/index.json" ]]; then
+        cp -f /var/cache/kpm/index.json "${ROOT_PREFIX}/var/cache/kpm/index.json"
+    fi
+
+    if [[ -f "${ROOT_PREFIX}/var/cache/kpm/index.json" ]]; then
+        AVAIL_PKGS="$("$KPM_BIN" --config "$TMP_KPM_INI" list --binaries | awk '{print $1}')"
+        INSTALL_LIST=()
+        MISSING_LIST=()
+        for p in "${REMOTE_NEEDED[@]}"; do
+            if grep -qx "$p" <<< "$AVAIL_PKGS"; then
+                INSTALL_LIST+=("$p")
+            else
+                MISSING_LIST+=("$p")
+            fi
+        done
+
+        if [[ "${#MISSING_LIST[@]}" -gt 0 ]]; then
+            echo "[setup] Note: package(s) not present in remote index: ${MISSING_LIST[*]}"
+        fi
+
+        if [[ "${#INSTALL_LIST[@]}" -gt 0 ]]; then
+            echo "[setup] Installing ${#INSTALL_LIST[@]} remaining package(s) from remote index..."
+            "$KPM_BIN" --config "$TMP_KPM_INI" --root="$TARGET_ROOT" install --deps --reinstall --force "${INSTALL_LIST[@]}" || {
+                echo "[setup] Warning: remote package install encountered errors; continuing with base system." >&2
+            }
+        fi
+    fi
+fi
+
+# Re-apply live kpm, ports, pkgadd, and release key configs into target rootfs so package
+# defaults never overwrite the configured repo/key settings.
+for cfg_file in /etc/kpm.ini /etc/pkgadd.conf /etc/ports/sources.list /etc/resolv.conf; do
+    if [[ -r "$cfg_file" ]]; then
+        install -D -m 0644 "$cfg_file" "${ROOT_PREFIX}${cfg_file}"
     fi
 done
+if [[ -d /etc/kpm/keys ]]; then
+    cp -a /etc/kpm/keys/. "${ROOT_PREFIX}/etc/kpm/keys/"
+fi
+ln -sf /etc/kpm.ini "${ROOT_PREFIX}/etc/kpm/kpm.ini"
 
-if [[ "${#MISSING_LIST[@]}" -gt 0 ]]; then
-    echo "[setup] Note: the following profile package(s) are not yet published in ${RELEASE_TAG}:"
-    echo "        ${MISSING_LIST[*]}"
-    echo "        (Install them from CRUX ISO media or build them after chroot with 'kpm build --deps --install <pkg>'.)"
+# Copy saved Wi-Fi networks from live environment (iwd) into target rootfs if present.
+if [[ -d /var/lib/iwd ]]; then
+    shopt -s nullglob
+    PSK_FILES=(/var/lib/iwd/*.psk)
+    shopt -u nullglob
+    if [[ "${#PSK_FILES[@]}" -gt 0 ]]; then
+        mkdir -p "${ROOT_PREFIX}/var/lib/iwd"
+        chmod 0700 "${ROOT_PREFIX}/var/lib/iwd"
+        cp -a "${PSK_FILES[@]}" "${ROOT_PREFIX}/var/lib/iwd/"
+    fi
 fi
 
-if [[ "${#INSTALL_LIST[@]}" -gt 0 ]]; then
-    echo "[setup] Installing ${#INSTALL_LIST[@]} binary package(s) into ${TARGET_ROOT}..."
-    "$KPM_BIN" --config "$HOST_KPM_INI" --root "$TARGET_ROOT" install --deps --reinstall "${INSTALL_LIST[@]}"
+# 6. Ensure target has a bootable kernel (fallback to live KryX kernel & modules).
+shopt -s nullglob
+TARGET_KERNELS=("${ROOT_PREFIX}"/boot/vmlinuz*)
+LIVE_KERNELS=(/boot/vmlinuz*)
+LIVE_SYSMAPS=(/boot/System.map*)
+LIVE_CONFIGS=(/boot/config*)
+shopt -u nullglob
+if [[ "${#TARGET_KERNELS[@]}" -eq 0 && "${#LIVE_KERNELS[@]}" -gt 0 ]]; then
+    echo "[setup] Copying live KryX kernel & modules into ${TARGET_ROOT}..."
+    cp -a "${LIVE_KERNELS[@]}" "${ROOT_PREFIX}/boot/"
+    [[ "${#LIVE_SYSMAPS[@]}" -gt 0 ]] && cp -a "${LIVE_SYSMAPS[@]}" "${ROOT_PREFIX}/boot/"
+    [[ "${#LIVE_CONFIGS[@]}" -gt 0 ]] && cp -a "${LIVE_CONFIGS[@]}" "${ROOT_PREFIX}/boot/"
+    LIVE_KVER="$(uname -r)"
+    if [[ -d "/lib/modules/${LIVE_KVER}" ]]; then
+        mkdir -p "${ROOT_PREFIX}/lib/modules"
+        cp -a "/lib/modules/${LIVE_KVER}" "${ROOT_PREFIX}/lib/modules/"
+    fi
 fi
 
-# 5. Ensure kpm, kpm-index, kryx-src, gports, and setup tools are present inside target rootfs.
-for tool in kpm kpm-index kryx-src gports setup setup-kryx setup-chroot setup-repo; do
+# 7. Ensure kpm tools and CRUX compatibility symlinks (including `ports`) exist in target rootfs.
+for tool in kpm kpm-index kryx-src; do
     if [[ ! -x "${ROOT_PREFIX}/usr/bin/${tool}" ]]; then
-        src_bin="$(command -v "$tool" 2>/dev/null || echo "${SCRIPT_DIR}/${tool}")"
-        if [[ -x "$src_bin" ]]; then
-            install -m 0755 "$src_bin" "${ROOT_PREFIX}/usr/bin/${tool}"
+        src_bin="$(command -v "$tool" 2>/dev/null || true)"
+        if [[ -n "$src_bin" && -x "$src_bin" ]]; then
+            install -D -m 0755 "$src_bin" "${ROOT_PREFIX}/usr/bin/${tool}"
         fi
     fi
 done
+for link in pkgadd pkgrm pkginfo pkgmk ports rejmerge prt-get; do
+    ln -sf kpm "${ROOT_PREFIX}/usr/bin/${link}"
+done
 
-# 6. Write baseline system identity & config files (without clobbering existing files).
+# Ensure /bin/sh exists and root shadow entry is not expired (sp_lstchg != 0).
+if [[ ! -e "${ROOT_PREFIX}/bin/sh" && -x "${ROOT_PREFIX}/bin/bash" ]]; then
+    ln -sf bash "${ROOT_PREFIX}/bin/sh"
+fi
+if [[ -f "${ROOT_PREFIX}/etc/shadow" ]]; then
+    sed -i 's|^root::0:|root::19999:|' "${ROOT_PREFIX}/etc/shadow"
+fi
+if [[ -s "${ROOT_PREFIX}/etc/ssl/cert.pem" ]]; then
+    ln -sf ../cert.pem "${ROOT_PREFIX}/etc/ssl/certs/ca-certificates.crt"
+fi
+if command -v ldconfig >/dev/null 2>&1 && [[ -f "${ROOT_PREFIX}/etc/ld.so.conf" ]]; then
+    ldconfig -r "$TARGET_ROOT" 2>/dev/null || true
+fi
+
+# 8. Write baseline system identity files without clobbering existing config.
 echo "$HOSTNAME_VAL" > "${ROOT_PREFIX}/etc/hostname"
 
 if [[ ! -f "${ROOT_PREFIX}/etc/hosts" ]]; then
@@ -218,7 +360,7 @@ NAME="KryX Linux"
 ID=kryx
 ID_LIKE=crux
 PRETTY_NAME="KryX Linux (Rolling)"
-HOME_URL="https://github.com/kryx-linux"
+HOME_URL="https://kryx.anrix.org"
 EOF
 fi
 
@@ -226,22 +368,114 @@ if [[ -f "${ROOT_PREFIX}/usr/share/zoneinfo/${TIMEZONE}" ]]; then
     ln -sf "/usr/share/zoneinfo/${TIMEZONE}" "${ROOT_PREFIX}/etc/localtime"
 fi
 
-if [[ ! -f "${ROOT_PREFIX}/etc/fstab" ]]; then
-    cat > "${ROOT_PREFIX}/etc/fstab" <<'EOF'
-# /etc/fstab - Update UUIDs/devices before rebooting!
-# <fs>                  <mount>   <type>   <options>         <dump> <pass>
-# UUID=<root-uuid>      /         ext4     defaults,noatime  0      1
-# UUID=<efi-uuid>       /boot/efi vfat     defaults          0      2
-tmpfs                   /tmp      tmpfs    defaults          0      0
-EOF
+# Configure CRUX /etc/rc.conf (hostname, timezone, and installed networking/Wi-Fi services).
+if [[ -f "${ROOT_PREFIX}/etc/rc.conf" ]]; then
+    RC_SERVICES=()
+    for svc in lo dbus iwd dhcpcd; do
+        if [[ -x "${ROOT_PREFIX}/etc/rc.d/${svc}" ]]; then
+            RC_SERVICES+=("$svc")
+        fi
+    done
+    sed -i \
+        -e "s|^HOSTNAME=.*|HOSTNAME=${HOSTNAME_VAL}|" \
+        -e "s|^TIMEZONE=.*|TIMEZONE=${TIMEZONE}|" \
+        -e "s|^SERVICES=.*|SERVICES=(${RC_SERVICES[*]})|" \
+        "${ROOT_PREFIX}/etc/rc.conf"
+fi
+
+# Configure opt-in dinit boot if requested and installed.
+if [[ "$INIT_SYSTEM" == "dinit" ]]; then
+    if [[ -x "${ROOT_PREFIX}/usr/sbin/dinit" && -d "${ROOT_PREFIX}/etc/dinit.d" ]]; then
+        mkdir -p "${ROOT_PREFIX}/etc/default" "${ROOT_PREFIX}/etc/dinit.d/boot.d"
+        if [[ ! -f "${ROOT_PREFIX}/etc/default/grub" ]]; then
+            printf 'GRUB_CMDLINE_LINUX_DEFAULT="init=/usr/sbin/dinit"\n' > "${ROOT_PREFIX}/etc/default/grub"
+        elif ! grep -q 'init=/usr/sbin/dinit' "${ROOT_PREFIX}/etc/default/grub" 2>/dev/null; then
+            if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' "${ROOT_PREFIX}/etc/default/grub"; then
+                sed -i -E 's|^(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*)"|\1 init=/usr/sbin/dinit"|; s|=" |="|' "${ROOT_PREFIX}/etc/default/grub"
+            else
+                echo 'GRUB_CMDLINE_LINUX_DEFAULT="init=/usr/sbin/dinit"' >> "${ROOT_PREFIX}/etc/default/grub"
+            fi
+        fi
+        # Ensure enabled boot.d symlinks match actually installed daemons.
+        rm -f "${ROOT_PREFIX}/etc/dinit.d/boot.d"/{dbus,iwd,dhcpcd,turnstiled}
+        [[ -x "${ROOT_PREFIX}/usr/sbin/dbus-daemon" ]] && ln -sf ../dbus       "${ROOT_PREFIX}/etc/dinit.d/boot.d/dbus"
+        [[ -x "${ROOT_PREFIX}/usr/sbin/iwd" ]]         && ln -sf ../iwd        "${ROOT_PREFIX}/etc/dinit.d/boot.d/iwd"
+        [[ -x "${ROOT_PREFIX}/sbin/dhcpcd" ]]          && ln -sf ../dhcpcd     "${ROOT_PREFIX}/etc/dinit.d/boot.d/dhcpcd"
+        [[ -x "${ROOT_PREFIX}/usr/bin/turnstiled" ]]   && ln -sf ../turnstiled "${ROOT_PREFIX}/etc/dinit.d/boot.d/turnstiled"
+        echo "[setup] Configured dinit as default GRUB init (init=/usr/sbin/dinit; rc remains available as fallback)."
+    else
+        echo "[setup] Note: dinit not installed (unavailable in offline pool); system will boot CRUX rc." >&2
+        echo "[setup]       Run 'kpm install -d dinit dinit-kryx && kryx-init use dinit' after boot to enable dinit." >&2
+    fi
+fi
+
+# Generate UUID-based /etc/fstab from currently mounted target block devices when available.
+if [[ ! -f "${ROOT_PREFIX}/etc/fstab" ]] || grep -q 'Fill in your disk UUIDs' "${ROOT_PREFIX}/etc/fstab" 2>/dev/null; then
+    ROOT_DEV="$(findmnt -n -o SOURCE "$TARGET_ROOT" 2>/dev/null || true)"
+    ROOT_FSTYPE="$(findmnt -n -o FSTYPE "$TARGET_ROOT" 2>/dev/null || echo ext4)"
+    ROOT_UUID=""
+    [[ -b "$ROOT_DEV" ]] && ROOT_UUID="$(blkid -s UUID -o value "$ROOT_DEV" 2>/dev/null || true)"
+
+    EFI_MNT=""
+    for cand_efi in "${ROOT_PREFIX}/boot/efi" "${ROOT_PREFIX}/efi"; do
+        if mountpoint -q "$cand_efi" 2>/dev/null; then
+            EFI_MNT="$cand_efi"
+            break
+        fi
+    done
+    EFI_DEV=""
+    EFI_UUID=""
+    if [[ -n "$EFI_MNT" ]]; then
+        EFI_DEV="$(findmnt -n -o SOURCE "$EFI_MNT" 2>/dev/null || true)"
+        [[ -b "$EFI_DEV" ]] && EFI_UUID="$(blkid -s UUID -o value "$EFI_DEV" 2>/dev/null || true)"
+    fi
+
+    {
+        echo "# /etc/fstab - Generated by KryX Linux setup"
+        echo "# <file system>                         <mount>    <type>  <options>         <dump> <pass>"
+        if [[ -n "$ROOT_UUID" ]]; then
+            printf 'UUID=%-35s /          %-7s defaults,noatime  0      1\n' "$ROOT_UUID" "$ROOT_FSTYPE"
+        else
+            echo "# UUID=<root-uuid>                      /          ext4    defaults,noatime  0      1"
+        fi
+        if [[ -n "$EFI_UUID" ]]; then
+            EFI_REL="${EFI_MNT#"${ROOT_PREFIX}"}"
+            printf 'UUID=%-35s %-10s vfat    defaults          0      2\n' "$EFI_UUID" "$EFI_REL"
+        fi
+        echo "tmpfs                                   /tmp       tmpfs   defaults          0      0"
+    } > "${ROOT_PREFIX}/etc/fstab"
+fi
+
+# 9. Strict post-install verification so setup-chroot and first boot never fail.
+MISSING_TARGET=()
+for req_rel in bin/sh bin/bash sbin/init etc/inittab etc/rc usr/bin/kpm; do
+    if [[ ! -e "${ROOT_PREFIX}/${req_rel}" ]]; then
+        MISSING_TARGET+=("/${req_rel}")
+    fi
+done
+shopt -s nullglob
+FINAL_KERNELS=("${ROOT_PREFIX}"/boot/vmlinuz*)
+shopt -u nullglob
+if [[ "${#FINAL_KERNELS[@]}" -eq 0 ]]; then
+    MISSING_TARGET+=("/boot/vmlinuz*")
+fi
+
+if [[ "${#MISSING_TARGET[@]}" -gt 0 ]]; then
+    echo "setup: ERROR: target installation at ${TARGET_ROOT} is incomplete; missing: ${MISSING_TARGET[*]}" >&2
+    echo "setup: Ensure the ISO pool (/run/live/media/pool) is mounted or network sync succeeded." >&2
+    exit 1
 fi
 
 echo ""
-echo "=== KryX Linux bootstrap complete! ==="
-echo "Next steps:"
-echo "  1. Enter the new system:  setup-chroot ${TARGET_ROOT}"
-echo "  2. Edit /etc/fstab with your disk UUIDs (run: blkid)"
-echo "  3. Set root password:     passwd"
-echo "  4. Install/configure your bootloader (GRUB / systemd-boot / limine)"
-echo "  5. Verify health:         kpm doctor"
-echo "  6. Exit chroot & reboot!"
+echo "=== KryX Linux base installation complete! ==="
+echo "Hand over to chroot for final configuration:"
+echo "  1. Enter chroot:        setup-chroot ${TARGET_ROOT}"
+echo "  2. Verify kernel:       ls -l /boot/vmlinuz* /lib/modules/"
+echo "  3. Review /etc/fstab:   cat /etc/fstab"
+echo "  4. Set root password:   passwd"
+echo "  5. Install GRUB:"
+echo "       UEFI: grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=KryX"
+echo "       BIOS: grub-install --target=i386-pc /dev/<disk>"
+echo "       grub-mkconfig -o /boot/grub/grub.cfg"
+echo "  6. Verify health:       kpm doctor && kpm check --broken"
+echo "  7. Exit & reboot:       exit && umount -R ${TARGET_ROOT} && reboot"
