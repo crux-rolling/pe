@@ -350,13 +350,14 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 	verboseShort := fs.Bool("v", false, "list all conflicting files without truncation")
 	withDeps := fs.Bool("deps", false, "also install missing dependencies from binary index")
 	withDepsShort := fs.Bool("d", false, "also install missing dependencies from binary index")
+	offline := fs.Bool("offline", false, "install strictly from local .pkg.tar.* files or cached binaries without network access")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 
 	targets := fs.Args()
 	if len(targets) == 0 {
-		return fmt.Errorf("usage: kpm install [-u|--upgrade] [-R|--reins|--reinstall] [-f|--force] [-d|--deps] [-v|--verbose] <package|file...>")
+		return fmt.Errorf("usage: kpm install [-u|--upgrade] [-R|--reins|--reinstall] [-f|--force] [-d|--deps] [--offline] [-v|--verbose] <package|file...>")
 	}
 
 	doUpgrade := *upgrade || *upgradeShort
@@ -364,6 +365,7 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 	doForce := *force || *forceShort
 	doVerbose := *verbose || *verboseShort
 	doDeps := *withDeps || *withDepsShort
+	doOffline := *offline
 
 	var localFiles []string
 	var pkgNames []string
@@ -415,9 +417,9 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 		}
 	}
 
-	// Load synced binary index (strictly binary-first; allow cached-only versioned installs if index absent).
+	// Load synced binary index (strictly binary-first; allow cached-only installs when --offline or pinned).
 	idx, idxErr := loadLocalIndex(cfg)
-	if idxErr != nil && len(pinnedVersions) == 0 {
+	if idxErr != nil && len(pinnedVersions) == 0 && !doOffline {
 		return idxErr
 	}
 
@@ -461,6 +463,25 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 		}
 		entry, ok := repo.Find(idx, name, cfg.Repo.Arch)
 		if !ok {
+			if doOffline {
+				if cached, cok := findCachedBinaryVersion(cfg.BinaryCacheDir(), name, ""); cok {
+					resolvedItems = append(resolvedItems, resolvedInstall{name: name, cachedPath: cached, explicit: explicitSet[name]})
+					continue
+				}
+			}
+			missing = append(missing, name)
+			continue
+		}
+		if doOffline {
+			cachedFile := filepath.Join(cfg.BinaryCacheDir(), entry.Filename)
+			if _, serr := os.Stat(cachedFile); serr == nil {
+				resolvedItems = append(resolvedItems, resolvedInstall{name: name, entry: entry, cachedPath: cachedFile, explicit: explicitSet[name]})
+				continue
+			}
+			if cached, cok := findCachedBinaryVersion(cfg.BinaryCacheDir(), name, ""); cok {
+				resolvedItems = append(resolvedItems, resolvedInstall{name: name, cachedPath: cached, explicit: explicitSet[name]})
+				continue
+			}
 			missing = append(missing, name)
 			continue
 		}
@@ -483,6 +504,9 @@ func cmdInstall(cfg config.Config, args []string, stdout, stderr io.Writer, rt R
 	for _, item := range resolvedItems {
 		localPath := item.cachedPath
 		if localPath == "" {
+			if doOffline {
+				return fmt.Errorf("offline mode: cached archive for %s not found in %s", item.name, cfg.BinaryCacheDir())
+			}
 			p, err := repo.FetchBinaryWithStyle(item.entry, cfg.BinaryCacheDir(), timeout, stdout, styles.out)
 			if err != nil {
 				return err
