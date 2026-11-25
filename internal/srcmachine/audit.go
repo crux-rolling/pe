@@ -353,6 +353,8 @@ func ShardTag(baseTag, collection, pkgName string) string {
 		return baseTag + "-opt"
 	case "xorg":
 		return baseTag + "-xorg"
+	case "compat-32":
+		return baseTag + "-compat32"
 	case "contrib":
 		if pkgName != "" {
 			c := strings.ToLower(pkgName[:1])[0]

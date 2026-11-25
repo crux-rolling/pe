@@ -84,7 +84,7 @@ cat > "$KPM_INI" <<EOF
 [paths]
 root = /
 ports_dir = ${PORTS_DIR}
-collections = pkg-tools, kernel, core, opt, xorg, contrib
+collections = pkg-tools, kernel, core, opt, xorg, contrib, compat-32
 cache_dir = /var/cache/kpm
 source_cache = /var/cache/kpm/sources
 package_dir = /var/cache/kpm/packages
@@ -129,11 +129,12 @@ if [[ ! -f "$PORTS_LIST" ]]; then
 # /etc/ports/sources.list - KryX Linux ports collections (used by \`ports\` / \`kpm ports\`)
 # Format: <protocol> <collection> <url> [destination]
 # Place custom third-party overlays in /etc/ports/sources.list.d/*.list
-git kryx    https://github.com/${REPO_SLUG}.git
-git core    https://github.com/kryx-linux/core.git
-git opt     https://github.com/kryx-linux/opt.git
-git xorg    https://github.com/kryx-linux/xorg.git
-git contrib https://github.com/kryx-linux/contrib.git
+git kryx      https://github.com/${REPO_SLUG}.git
+git core      https://github.com/kryx-linux/core.git
+git opt       https://github.com/kryx-linux/opt.git
+git xorg      https://github.com/kryx-linux/xorg.git
+git contrib   https://github.com/kryx-linux/contrib.git
+git compat-32 https://github.com/kryx-linux/compat-32.git
 EOF
     chmod 0644 "$PORTS_LIST"
 fi

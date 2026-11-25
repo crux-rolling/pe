@@ -43,4 +43,10 @@ func TestMulticallPrtGetShim(t *testing.T) {
 	if code != 0 || !strings.Contains(out.String(), "xorg-xwayland 24.1.4-1") {
 		t.Fatalf("unexpected listinst output: code=%d out=%q", code, out.String())
 	}
+
+	out.Reset()
+	code = RunWithArgv0Options("/usr/bin/prt-get", []string{"--install-root=" + root, "printf", `%v\n`, "--filter=libinput"}, &out, &errBuf, RuntimeOptions{SkipRootCheck: true})
+	if code != 0 || strings.TrimSpace(out.String()) != "1.27.0" {
+		t.Fatalf("unexpected printf output: code=%d out=%q", code, out.String())
+	}
 }

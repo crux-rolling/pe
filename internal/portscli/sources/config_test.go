@@ -16,8 +16,8 @@ func TestLoadDefaultTemplate(t *testing.T) {
 	if !res.OK() {
 		t.Fatalf("expected default template to lint cleanly, got errors: %v", res.Errors)
 	}
-	if len(res.Sources) != 5 {
-		t.Fatalf("expected 5 collections in default template, got %d", len(res.Sources))
+	if len(res.Sources) != 6 {
+		t.Fatalf("expected 6 collections in default template, got %d", len(res.Sources))
 	}
 
 	want := []struct {
@@ -31,6 +31,7 @@ func TestLoadDefaultTemplate(t *testing.T) {
 		{ProtoGit, "opt", "https://github.com/kryx-linux/opt.git", "/usr/ports/opt"},
 		{ProtoGit, "xorg", "https://github.com/kryx-linux/xorg.git", "/usr/ports/xorg"},
 		{ProtoGit, "contrib", "https://github.com/kryx-linux/contrib.git", "/usr/ports/contrib"},
+		{ProtoGit, "compat-32", "https://github.com/kryx-linux/compat-32.git", "/usr/ports/compat-32"},
 	}
 
 	for i, w := range want {

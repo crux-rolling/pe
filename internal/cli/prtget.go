@@ -16,6 +16,7 @@ func runPrtGet(args []string, stdout, stderr io.Writer) int {
 	root := "/"
 	quiet := false
 	showVersion := false
+	filter := ""
 	var pos []string
 
 	for i := 0; i < len(args); i++ {
@@ -29,10 +30,12 @@ commands:
   isinst <pkg...>     exit 0 if all listed packages are installed, else 1
   current <pkg>       print installed version of <pkg>
   listinst [-v]       list installed packages
+  printf <fmt>        print formatted package fields (--filter=<pkg>)
   version             print version and exit
 
 options:
   --install-root=<p>  alternate root directory (default: /)
+  --filter=<pkg>      package name filter for printf
   -q, --quiet         suppress output for isinst
   -v, --version       print version (or show versions with listinst)
 `)
@@ -44,6 +47,13 @@ options:
 			showVersion = true
 		case a == "-q" || a == "--quiet":
 			quiet = true
+		case strings.HasPrefix(a, "--filter="):
+			filter = strings.TrimPrefix(a, "--filter=")
+		case a == "--filter":
+			if i+1 < len(args) {
+				filter = args[i+1]
+				i++
+			}
 		case strings.HasPrefix(a, "--install-root="):
 			root = strings.TrimPrefix(a, "--install-root=")
 		case a == "--install-root" || a == "-r" || a == "--root":
@@ -132,6 +142,35 @@ options:
 			} else {
 				fmt.Fprintln(stdout, name)
 			}
+		}
+		return 0
+
+	case "printf":
+		if len(rest) == 0 {
+			fmt.Fprintln(stderr, "prt-get: printf requires a format string")
+			return 1
+		}
+		formatStr := strings.ReplaceAll(rest[0], `\n`, "\n")
+		formatStr = strings.ReplaceAll(formatStr, `\t`, "\t")
+		names := make([]string, 0, len(db.Packages))
+		for name := range db.Packages {
+			if filter == "" || name == filter {
+				names = append(names, name)
+			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			verFull := db.Packages[name].Version
+			ver, rel := verFull, ""
+			if dash := strings.LastIndexByte(verFull, '-'); dash > 0 {
+				ver, rel = verFull[:dash], verFull[dash+1:]
+			}
+			line := formatStr
+			line = strings.ReplaceAll(line, "%n", name)
+			line = strings.ReplaceAll(line, "%v", ver)
+			line = strings.ReplaceAll(line, "%r", rel)
+			line = strings.ReplaceAll(line, "%i", "yes")
+			fmt.Fprint(stdout, line)
 		}
 		return 0
 
