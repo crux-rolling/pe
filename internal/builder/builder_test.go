@@ -133,8 +133,31 @@ func TestFallbackSourceURLs(t *testing.T) {
 			want: []string{"https://mirrors.kernel.org/gnu/ed/ed-1.22.6.tar.lz"},
 		},
 		{
-			in:   "https://download.savannah.gnu.org/releases/ed/ed-1.22.6.tar.lz",
-			want: []string{"https://download-mirror.savannah.gnu.org/releases/ed/ed-1.22.6.tar.lz"},
+			in: "https://download.savannah.gnu.org/releases/ed/ed-1.22.6.tar.lz",
+			want: []string{
+				"https://download-mirror.savannah.gnu.org/releases/ed/ed-1.22.6.tar.lz",
+				"https://download.savannah.nongnu.org/releases/ed/ed-1.22.6.tar.lz",
+				"https://download-mirror.savannah.nongnu.org/releases/ed/ed-1.22.6.tar.lz",
+			},
+		},
+		{
+			in: "https://gmplib.org/download/gmp/gmp-6.3.0.tar.xz",
+			want: []string{
+				"https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz",
+				"https://mirrors.kernel.org/gnu/gmp/gmp-6.3.0.tar.xz",
+			},
+		},
+		{
+			in: "https://sourceforge.net/projects/freetype/files/freetype2/2.15.0/freetype-2.15.0.tar.xz",
+			want: []string{
+				"https://downloads.sourceforge.net/project/freetype/freetype2/2.15.0/freetype-2.15.0.tar.xz",
+				"https://download.savannah.gnu.org/releases/freetype/freetype-2.15.0.tar.xz",
+				"https://download-mirror.savannah.gnu.org/releases/freetype/freetype-2.15.0.tar.xz",
+			},
+		},
+		{
+			in:   "https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.4/e2fsprogs-1.47.4.tar.xz",
+			want: []string{"https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.4/e2fsprogs-1.47.4.tar.xz"},
 		},
 		{
 			in:   "https://example.org/foo.tar.xz",
@@ -183,5 +206,56 @@ func TestHTTPDownloadWithRetryRecoversFromTransientMirrorFailure(t *testing.T) {
 	got, err := os.ReadFile(dst)
 	if err != nil || string(got) != "tarball-bytes" {
 		t.Fatalf("unexpected downloaded content %q (err=%v)", string(got), err)
+	}
+}
+
+func TestHTTPDownloadSetsCurlUserAgentAndRejectsHTMLInterstitial(t *testing.T) {
+	prevDelay := downloadRetryDelay
+	downloadRetryDelay = 0
+	t.Cleanup(func() { downloadRetryDelay = prevDelay })
+
+	var sawUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawUA = r.Header.Get("User-Agent")
+		switch r.URL.Path {
+		case "/html-interstitial.tar.xz":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte("<!DOCTYPE html><html><body>Your download will start shortly...</body></html>"))
+		case "/html-disguised.tar.xz":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write([]byte("<html><head><title>Mirror Error</title></head></html>"))
+		default:
+			w.Header().Set("Content-Type", "application/x-xz")
+			_, _ = w.Write([]byte("\xfd7zXZ\x00real-archive-bytes"))
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	var out bytes.Buffer
+	st := ui.NewStyler("never", &out)
+
+	// 1. HTML Content-Type must be rejected and NOT saved into source_cache.
+	dst1 := filepath.Join(dir, "freetype-2.15.0.tar.xz")
+	if err := httpDownload(srv.URL+"/html-interstitial.tar.xz", dst1, 5*time.Second, &out, st); err == nil {
+		t.Fatalf("expected HTML interstitial to be rejected")
+	}
+	if _, err := os.Stat(dst1); !os.IsNotExist(err) {
+		t.Fatalf("expected poisoned HTML file NOT to exist at %s", dst1)
+	}
+	if !strings.HasPrefix(sawUA, "curl/") {
+		t.Fatalf("expected curl/ User-Agent, got %q", sawUA)
+	}
+
+	// 2. HTML body with octet-stream Content-Type must also be rejected via body sniffing.
+	dst2 := filepath.Join(dir, "acl-2.4.0.tar.xz")
+	if err := httpDownload(srv.URL+"/html-disguised.tar.xz", dst2, 5*time.Second, &out, st); err == nil {
+		t.Fatalf("expected HTML body sniff to reject disguised HTML")
+	}
+
+	// 3. Valid archive downloads cleanly with curl User-Agent.
+	dst3 := filepath.Join(dir, "ok.tar.xz")
+	if err := httpDownload(srv.URL+"/ok.tar.xz", dst3, 5*time.Second, &out, st); err != nil {
+		t.Fatalf("expected valid archive download to succeed, got %v", err)
 	}
 }

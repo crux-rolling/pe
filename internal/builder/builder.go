@@ -233,7 +233,17 @@ func resolveAndDownloadSources(cfg config.Config, port ports.Port, out io.Writer
 	for i, src := range port.Source {
 		rename := renameAt(port.Renames, i)
 		localPath := resolveLocalSourcePath(src, rename, port.Dir, cfg.Paths.SourceCache)
-		if _, err := os.Stat(localPath); err != nil {
+		needDownload := false
+		if fi, err := os.Stat(localPath); err != nil {
+			needDownload = true
+		} else if isRemoteSource(src) && looksLikeArchivePath(localPath) {
+			if fi.Size() == 0 || fileLooksLikeHTML(localPath) {
+				fmt.Fprintf(out, "=======> Removing invalid cached source '%s' and re-downloading.\n", localPath)
+				_ = os.Remove(localPath)
+				needDownload = true
+			}
+		}
+		if needDownload {
 			if !isRemoteSource(src) {
 				return nil, fmt.Errorf("source file %q not found (not a URL)", localPath)
 			}
@@ -249,7 +259,47 @@ func resolveAndDownloadSources(cfg config.Config, port ports.Port, out io.Writer
 	return resolved, nil
 }
 
+const downloadUserAgent = "curl/8.12.1"
+
 var downloadRetryDelay = time.Second
+
+func looksLikeArchivePath(p string) bool {
+	low := strings.ToLower(p)
+	for _, ext := range []string{
+		".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2",
+		".tar.xz", ".txz", ".tar.lz", ".tar.lzma", ".tar.zst", ".tzst",
+		".zip", ".gz", ".bz2", ".xz", ".lz", ".zst", ".7z", ".rpm", ".deb",
+	} {
+		if strings.HasSuffix(low, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeHTMLBytes(buf []byte) bool {
+	trimmed := bytes.TrimSpace(buf)
+	if len(trimmed) == 0 {
+		return false
+	}
+	low := strings.ToLower(string(trimmed))
+	return strings.HasPrefix(low, "<!doctype html") ||
+		strings.HasPrefix(low, "<html") ||
+		strings.HasPrefix(low, "<head") ||
+		strings.HasPrefix(low, "<title") ||
+		(strings.HasPrefix(low, "<!--") && strings.Contains(low, "<html"))
+}
+
+func fileLooksLikeHTML(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, 512)
+	n, _ := f.Read(buf)
+	return looksLikeHTMLBytes(buf[:n])
+}
 
 func fallbackSourceURLs(rawURL string) []string {
 	u, err := url.Parse(rawURL)
@@ -273,21 +323,54 @@ func fallbackSourceURLs(rawURL string) []string {
 		if gnuPath != "" {
 			out = append(out, "https://mirrors.kernel.org/gnu/"+gnuPath)
 		}
-	case "download.savannah.gnu.org":
-		if cleanPath != "" {
-			out = append(out, "https://download-mirror.savannah.gnu.org/"+cleanPath)
+	case "gmplib.org", "www.gmplib.org":
+		if strings.HasPrefix(cleanPath, "download/gmp/") {
+			rel := strings.TrimPrefix(cleanPath, "download/gmp/")
+			if rel != "" {
+				out = append(out,
+					"https://ftp.gnu.org/gnu/gmp/"+rel,
+					"https://mirrors.kernel.org/gnu/gmp/"+rel,
+				)
+			}
 		}
-	case "download-mirror.savannah.gnu.org":
-		if cleanPath != "" {
-			out = append(out, "https://download.savannah.gnu.org/"+cleanPath)
+	case "sourceforge.net", "www.sourceforge.net":
+		// Rewrite /projects/<proj>/files/<rest>[/download] -> downloads.sourceforge.net/project/<proj>/<rest>
+		parts := strings.Split(cleanPath, "/")
+		if len(parts) >= 4 && parts[0] == "projects" && parts[2] == "files" {
+			proj := parts[1]
+			restParts := parts[3:]
+			if len(restParts) > 0 && restParts[len(restParts)-1] == "download" {
+				restParts = restParts[:len(restParts)-1]
+			}
+			rest := strings.Join(restParts, "/")
+			if proj != "" && rest != "" {
+				out = append(out, "https://downloads.sourceforge.net/project/"+proj+"/"+rest)
+				if proj == "freetype" {
+					base := filepath.Base(rest)
+					out = append(out,
+						"https://download.savannah.gnu.org/releases/freetype/"+base,
+						"https://download-mirror.savannah.gnu.org/releases/freetype/"+base,
+					)
+				}
+			}
 		}
-	case "download.savannah.nongnu.org":
+	case "download.savannah.gnu.org", "download-mirror.savannah.gnu.org",
+		"download.savannah.nongnu.org", "download-mirror.savannah.nongnu.org":
 		if cleanPath != "" {
-			out = append(out, "https://download-mirror.savannah.nongnu.org/"+cleanPath)
+			for _, alt := range []string{
+				"download.savannah.gnu.org",
+				"download-mirror.savannah.gnu.org",
+				"download.savannah.nongnu.org",
+				"download-mirror.savannah.nongnu.org",
+			} {
+				if alt != host {
+					out = append(out, "https://"+alt+"/"+cleanPath)
+				}
+			}
 		}
-	case "download-mirror.savannah.nongnu.org":
-		if cleanPath != "" {
-			out = append(out, "https://download.savannah.nongnu.org/"+cleanPath)
+	case "www.kernel.org", "kernel.org":
+		if strings.HasPrefix(cleanPath, "pub/") {
+			out = append(out, "https://mirrors.edge.kernel.org/"+cleanPath)
 		}
 	}
 	return out
@@ -299,7 +382,8 @@ func isRedirectorMirrorHost(rawURL string) bool {
 		return false
 	}
 	switch strings.ToLower(u.Hostname()) {
-	case "ftpmirror.gnu.org", "downloads.sourceforge.net", "prdownloads.sourceforge.net", "dl.sourceforge.net":
+	case "ftpmirror.gnu.org", "sourceforge.net", "www.sourceforge.net",
+		"downloads.sourceforge.net", "prdownloads.sourceforge.net", "dl.sourceforge.net":
 		return true
 	default:
 		return false
@@ -331,6 +415,7 @@ func downloadSourceFile(cfg config.Config, rawURL, destPath string, out io.Write
 	}
 
 	var lastErr error
+	var httpCandidates []string
 	for idx, candidate := range candidates {
 		if idx > 0 && candidate != rawURL {
 			fmt.Fprintf(out, "=======> Trying fallback mirror '%s'.\n", candidate)
@@ -349,6 +434,7 @@ func downloadSourceFile(cfg config.Config, rawURL, destPath string, out io.Write
 			}
 		}
 		if strings.HasPrefix(candidate, "http://") || strings.HasPrefix(candidate, "https://") {
+			httpCandidates = append(httpCandidates, candidate)
 			if err := httpDownloadWithRetry(candidate, destPath, time.Duration(cfg.Repo.TimeoutSeconds)*time.Second, 3, out, ui.NewStyler(cfg.UI.Color, out)); err == nil {
 				return nil
 			} else {
@@ -356,39 +442,76 @@ func downloadSourceFile(cfg config.Config, rawURL, destPath string, out io.Write
 				continue
 			}
 		}
-		// Fallback to curl/wget for ftp:// or custom protocols
+		if err := externalDownload(cfg, candidate, destPath); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+
+	// Final fallback: if pure-Go HTTP failed (e.g. strict TLS fingerprinting / HTTP/2
+	// bot filter on an upstream host), retry via external curl/wget if available.
+	if len(httpCandidates) > 0 {
 		prog := cfg.Build.DownloadProg
 		if prog == "" {
 			prog = "curl"
 		}
-		var cmd *exec.Cmd
-		partial := destPath + ".partial"
-		switch prog {
-		case "wget":
-			args := []string{"--tries=3", "--output-document", partial}
-			if cfg.Build.WgetOpts != "" {
-				args = append(args, strings.Fields(cfg.Build.WgetOpts)...)
+		if _, err := exec.LookPath(prog); err == nil {
+			for _, candidate := range httpCandidates {
+				fmt.Fprintf(out, "=======> Retrying with %s: '%s'.\n", prog, candidate)
+				if derr := externalDownload(cfg, candidate, destPath); derr == nil {
+					return nil
+				} else {
+					lastErr = derr
+				}
 			}
-			args = append(args, candidate)
-			cmd = exec.Command("wget", args...)
-		default:
-			args := []string{"-L", "--fail", "--retry", "3", "-o", partial}
-			if cfg.Build.CurlOpts != "" {
-				args = append(args, strings.Fields(cfg.Build.CurlOpts)...)
-			}
-			args = append(args, candidate)
-			cmd = exec.Command("curl", args...)
-		}
-		if err := cmd.Run(); err == nil {
-			if err := os.Rename(partial, destPath); err == nil {
-				return nil
-			}
-		} else {
-			lastErr = err
-			_ = os.Remove(partial)
 		}
 	}
 	return fmt.Errorf("downloading %q failed: %w", rawURL, lastErr)
+}
+
+func externalDownload(cfg config.Config, candidate, destPath string) error {
+	prog := cfg.Build.DownloadProg
+	if prog == "" {
+		prog = "curl"
+	}
+	partial := destPath + ".partial"
+	_ = os.Remove(partial)
+	var cmd *exec.Cmd
+	switch prog {
+	case "wget":
+		args := []string{"--tries=3", "--user-agent=" + downloadUserAgent, "--output-document", partial}
+		if cfg.Build.WgetOpts != "" {
+			args = append(args, strings.Fields(cfg.Build.WgetOpts)...)
+		}
+		args = append(args, candidate)
+		cmd = exec.Command("wget", args...)
+	default:
+		args := []string{"-fsSL", "--retry", "2", "-A", downloadUserAgent, "-o", partial}
+		if cfg.Build.CurlOpts != "" {
+			args = append(args, strings.Fields(cfg.Build.CurlOpts)...)
+		}
+		args = append(args, candidate)
+		cmd = exec.Command("curl", args...)
+	}
+	if err := cmd.Run(); err != nil {
+		_ = os.Remove(partial)
+		return err
+	}
+	fi, err := os.Stat(partial)
+	if err != nil || fi.Size() == 0 {
+		_ = os.Remove(partial)
+		return fmt.Errorf("%s downloaded empty file for %s", prog, candidate)
+	}
+	if looksLikeArchivePath(destPath) && fileLooksLikeHTML(partial) {
+		_ = os.Remove(partial)
+		return fmt.Errorf("server returned HTML page instead of archive for %s", candidate)
+	}
+	if err := os.Rename(partial, destPath); err != nil {
+		_ = os.Remove(partial)
+		return err
+	}
+	return nil
 }
 
 type httpStatusError struct {
@@ -432,8 +555,26 @@ func httpDownload(rawURL, destPath string, timeout time.Duration, out io.Writer,
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.DisableKeepAlives = true
-	client := &http.Client{Timeout: timeout, Transport: tr}
-	resp, err := client.Get(rawURL)
+	client := &http.Client{
+		Timeout:   timeout,
+		Transport: tr,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			req.Header.Set("User-Agent", downloadUserAgent)
+			req.Header.Set("Accept", "*/*")
+			return nil
+		},
+	}
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", downloadUserAgent)
+	req.Header.Set("Accept", "*/*")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -441,6 +582,28 @@ func httpDownload(rawURL, destPath string, timeout time.Duration, out io.Writer,
 	if resp.StatusCode != http.StatusOK {
 		return httpStatusError{code: resp.StatusCode, status: resp.Status}
 	}
+	expectArchive := looksLikeArchivePath(destPath)
+	if expectArchive {
+		ct := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type")))
+		if strings.HasPrefix(ct, "text/html") || strings.HasPrefix(ct, "application/xhtml+xml") {
+			return fmt.Errorf("server returned HTML (%s) instead of archive for %s", ct, rawURL)
+		}
+	}
+
+	// Peek initial bytes before creating the final file so HTML interstitials never poison source_cache.
+	sniffBuf := make([]byte, 512)
+	sniffN, sniffErr := io.ReadFull(resp.Body, sniffBuf)
+	if sniffErr != nil && sniffErr != io.EOF && sniffErr != io.ErrUnexpectedEOF {
+		return sniffErr
+	}
+	sniff := sniffBuf[:sniffN]
+	if len(sniff) == 0 {
+		return fmt.Errorf("empty response body from %s", rawURL)
+	}
+	if expectArchive && looksLikeHTMLBytes(sniff) {
+		return fmt.Errorf("server returned HTML page instead of archive for %s", rawURL)
+	}
+
 	prog := ui.NewProgress(out, styler, "downloading "+filepath.Base(destPath), resp.ContentLength)
 	partial := destPath + ".partial"
 	f, err := os.Create(partial)
@@ -448,7 +611,8 @@ func httpDownload(rawURL, destPath string, timeout time.Duration, out io.Writer,
 		prog.Fail()
 		return err
 	}
-	if _, err := io.Copy(f, io.TeeReader(resp.Body, prog)); err != nil {
+	reader := io.MultiReader(bytes.NewReader(sniff), resp.Body)
+	if _, err := io.Copy(f, io.TeeReader(reader, prog)); err != nil {
 		prog.Fail()
 		_ = f.Close()
 		_ = os.Remove(partial)
